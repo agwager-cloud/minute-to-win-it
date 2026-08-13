@@ -1,0 +1,176 @@
+import Phaser from 'phaser';
+import './styles.css';
+import { GAME_BY_ID, GAMES, PLAYABLE_GAMES, type GameDefinition } from './games';
+import { NetworkClient, type MatchState, type PlayerState, type PrecisionState, type RoomState } from './network';
+
+const appEl=document.querySelector<HTMLDivElement>('#app')!;
+const DESIGN_W=1280, DESIGN_H=720;
+
+function esc(v:unknown){return String(v??'').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;')}
+function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[Math.floor(a.length/2)]??0}
+function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
+function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
+
+class NeonBackdrop extends Phaser.Scene{
+  particles:Phaser.GameObjects.Arc[]=[];
+  create(){
+    const g=this.add.graphics();g.fillGradientStyle(0x050817,0x111a43,0x070a20,0x1a1038,1);g.fillRect(0,0,DESIGN_W,DESIGN_H);
+    const grid=this.add.graphics();grid.lineStyle(1,0x56d8ff,.07);for(let x=0;x<DESIGN_W;x+=64)grid.lineBetween(x,0,x,DESIGN_H);for(let y=0;y<DESIGN_H;y+=64)grid.lineBetween(0,y,DESIGN_W,y);
+    for(let i=0;i<30;i++){const c=this.add.circle(Phaser.Math.Between(0,DESIGN_W),Phaser.Math.Between(0,DESIGN_H),Phaser.Math.Between(2,7),i%3===0?0xffce3a:0x56d8ff,Phaser.Math.FloatBetween(.08,.25));this.particles.push(c);}
+    const glow=this.add.graphics();glow.fillStyle(0x00d8ff,.08);glow.fillCircle(120,110,260);glow.fillStyle(0xff3f8f,.07);glow.fillCircle(1160,620,300);
+  }
+  update(time:number){this.particles.forEach((p,i)=>{p.y+=.06+(i%4)*.018;if(p.y>730)p.y=-10;p.alpha=.08+(.12*(1+Math.sin(time/700+i)))/2;});}
+}
+new Phaser.Game({type:Phaser.AUTO,width:DESIGN_W,height:DESIGN_H,parent:'phaser-bg',backgroundColor:'#050817',scene:[NeonBackdrop],scale:{mode:Phaser.Scale.RESIZE,autoCenter:Phaser.Scale.CENTER_BOTH}});
+
+class SoundBank{
+  enabled=localStorage.getItem('mtwi-sound')!=='off';
+  toggle(){this.enabled=!this.enabled;localStorage.setItem('mtwi-sound',this.enabled?'on':'off');}
+  beep(freq=520,duration=.06){if(!this.enabled)return;try{const C=(window.AudioContext||(window as any).webkitAudioContext);const ctx=new C();const o=ctx.createOscillator(),gain=ctx.createGain();o.frequency.value=freq;gain.gain.value=.045;o.connect(gain);gain.connect(ctx.destination);o.start();gain.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+duration);o.stop(ctx.currentTime+duration+.01);}catch{}}
+}
+const sound=new SoundBank();
+
+type Session={roomCode:string;playerId:string;resumeToken:string;isHost:boolean};
+
+class MinuteApp{
+  room?:RoomState; session?:Session; status:'connecting'|'online'|'offline'='connecting'; statusDetail=''; message=''; spectatingMatchId?:string;
+  controller?:PrecisionController;
+  net:NetworkClient;
+  constructor(){
+    this.net=new NetworkClient({
+      onStatus:(s,d)=>{this.status=s;this.statusDetail=d||'';this.updateConnectionBadge();if(!this.room)this.render();},
+      onJoined:s=>{this.session=s;this.render();},
+      onRoomState:r=>this.onRoomState(r),
+      onError:m=>{this.message=m;this.toast(m,'error');},
+      onKicked:m=>{this.room=undefined;this.session=undefined;this.spectatingMatchId=undefined;this.message=m;this.render();},
+      onResumeFailed:()=>{this.room=undefined;this.session=undefined;this.render();},
+    });
+    this.session=this.net.session as Session|undefined;
+    this.net.start();
+    document.addEventListener('focusin',e=>{if((e.target as HTMLElement).matches('input'))document.body.classList.add('typing')});
+    document.addEventListener('focusout',()=>document.body.classList.remove('typing'));
+    window.setInterval(()=>this.tick(),150);
+    this.render();
+  }
+  get me(){return this.room?.players.find(p=>p.id===this.session?.playerId)}
+  get selectedGame(){return GAME_BY_ID.get(this.room?.selectedGameId||'lights-out')||GAMES[0]}
+  player(id?:string){return this.room?.players.find(p=>p.id===id)}
+  activeMatchFor(id?:string){if(!id||!this.room)return undefined;for(const c of this.room.courts){if(c.activeMatch?.playerIds.includes(id))return c.activeMatch;}return undefined}
+  findMatch(id?:string){if(!id||!this.room)return undefined;for(const c of this.room.courts)if(c.activeMatch?.id===id)return c.activeMatch;return undefined}
+  onRoomState(r:RoomState){
+    this.room=r;
+    const live=this.controller?this.findMatch(this.controller.matchId):undefined;
+    if(this.controller?.running&&live?.status==='playing'&&live.precision?.phase==='playing'&&!live.precision.results[this.session?.playerId||'']){this.controller.sync(r,live);return;}
+    if(this.controller){this.controller.destroy();this.controller=undefined;}
+    if(this.spectatingMatchId&&!this.findMatch(this.spectatingMatchId))this.spectatingMatchId=undefined;
+    this.render();
+  }
+  render(){
+    const old=this.controller;if(old){old.destroy();this.controller=undefined;}
+    if(!this.room||!this.session){this.renderStart();return;}
+    if(this.room.phase==='lobby'){this.renderLobby();return;}
+    const mine=this.activeMatchFor(this.session.playerId);
+    if(mine){this.renderGame(mine,false);return;}
+    const watched=this.findMatch(this.spectatingMatchId);
+    if(watched){this.renderGame(watched,true);return;}
+    this.renderMatchups();
+  }
+  shell(inner:string,klass=''){
+    return `<main class="screen ${klass}"><header class="topbar"><div class="brand-mini"><span class="brand-stopwatch">⏱</span><div><strong>MINUTE TO WIN IT</strong><small>ONE COURT · ONE CHALLENGE · KEEP MOVING RIGHT</small></div></div>${this.room?`<div class="room-pill"><small>ROOM</small><strong>${esc(this.room.code)}</strong></div>`:''}<button id="sound-toggle" class="icon-btn">${sound.enabled?'🔊':'🔇'}</button><div id="connection-badge" class="connection ${this.status}">${this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING'}</div></header>${inner}</main>`;
+  }
+  bindCommon(){document.querySelector('#sound-toggle')?.addEventListener('click',()=>{sound.toggle();sound.beep();this.render();});}
+  updateConnectionBadge(){const el=document.querySelector('#connection-badge');if(el){el.className=`connection ${this.status}`;el.textContent=this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING';}}
+  renderStart(){
+    appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>14 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
+    this.bindCommon();const name=document.querySelector<HTMLInputElement>('#name')!,code=document.querySelector<HTMLInputElement>('#code')!;code.addEventListener('input',()=>code.value=code.value.replace(/\D/g,'').slice(0,5));
+    document.querySelector('#host')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.hostRoom(name.value.trim())});
+    document.querySelector('#join')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.joinRoom(name.value.trim(),code.value.trim())});
+  }
+  renderLobby(){
+    const players=this.room!.players.filter(p=>!p.isBot);const game=this.selectedGame;
+    const cards=GAMES.map((g,i)=>`<button class="game-card ${g.id===game.id?'selected':''} ${g.playable?'':'locked'}" data-game="${g.id}" ${!this.me?.isHost||!g.playable?'disabled':''}><span class="game-no">${String(i+1).padStart(2,'0')}</span><span class="game-icon">${g.symbol}</span><strong>${esc(g.title)}</strong><small>${esc(g.category)}</small><em>${g.playable?'PLAYABLE':'COMING SOON'}</em></button>`).join('');
+    appEl.innerHTML=this.shell(`<section class="lobby-wrap"><div class="lobby-title"><div><span class="eyebrow">HOST SELECTOR</span><h2>Choose the next challenge</h2></div><div class="selected-chip"><span>${game.symbol}</span><div><small>SELECTED</small><strong>${esc(game.title)}</strong></div></div></div><div class="carousel-shell"><button id="scroll-left" class="carousel-arrow">‹</button><div id="game-carousel" class="game-carousel">${cards}</div><button id="scroll-right" class="carousel-arrow">›</button></div><div class="lobby-bottom"><section class="player-panel"><div class="panel-head"><strong>PLAYERS</strong><span>${players.length}/40</span></div><div class="player-grid">${players.map(p=>`<div class="player-chip ${p.isHost?'host':''}"><span class="presence ${p.connected?'on':''}"></span><strong>${esc(p.name)}</strong>${p.isHost?'<small>HOST</small>':''}${this.me?.isHost&&!p.isHost?`<button class="kick" data-kick="${p.id}">×</button>`:''}</div>`).join('')}</div></section><section class="launch-panel"><div class="challenge-preview"><span class="mega-icon">${game.symbol}</span><div><span class="eyebrow">${esc(game.category)}</span><h3>${esc(game.title)}</h3><p>${esc(game.tagline)}</p><small>${esc(game.duration)}</small></div></div>${this.me?.isHost?`<div class="host-buttons"><button id="random-game" class="secondary">🎲 RANDOM PLAYABLE GAME</button><button id="prepare" class="primary big">CREATE MATCHUPS →</button></div>`:`<div class="waiting-host">Waiting for the host to create matchups…</div>`}</section></div></section>`,'lobby-screen');
+    this.bindCommon();
+    document.querySelectorAll<HTMLElement>('[data-game]').forEach(el=>el.addEventListener('click',()=>{if(!this.me?.isHost)return;this.net.send({type:'select-game',gameId:el.dataset.game})}));
+    const car=document.querySelector<HTMLElement>('#game-carousel')!;document.querySelector('#scroll-left')?.addEventListener('click',()=>car.scrollBy({left:-430,behavior:'smooth'}));document.querySelector('#scroll-right')?.addEventListener('click',()=>car.scrollBy({left:430,behavior:'smooth'}));
+    document.querySelector('#random-game')?.addEventListener('click',()=>{const g=PLAYABLE_GAMES[Math.floor(Math.random()*PLAYABLE_GAMES.length)];this.net.send({type:'select-game',gameId:g.id})});
+    document.querySelector('#prepare')?.addEventListener('click',()=>this.net.send({type:'prepare-matchups'}));
+    document.querySelectorAll<HTMLElement>('[data-kick]').forEach(el=>el.addEventListener('click',()=>this.net.send({type:'kick-player',playerId:el.dataset.kick})));
+  }
+  renderMatchups(){
+    const room=this.room!,game=this.selectedGame;const champion=room.currentChampionId;const ranked=[...room.players].filter(p=>!p.isBot).sort((a,b)=>a.id===champion?-1:b.id===champion?1:b.points-a.points||a.name.localeCompare(b.name));
+    const courts=room.courts.map((c,i)=>{const m=c.activeMatch;const a=this.player(m?.playerIds[0]),b=this.player(m?.playerIds[1]);const status=m?.status||'waiting';return `<button class="court-card ${i===room.courts.length-1?'championship':''} ${m?'clickable':''}" ${m?`data-watch="${m.id}"`:''}><div class="court-head"><strong>${i===room.courts.length-1?'👑 CHAMPIONSHIP':i===0?'LOWEST COURT':`COURT ${i+1}`}</strong><span class="status ${status}">${status.toUpperCase()}</span></div>${m?`<div class="versus"><div><span class="presence ${a?.connected?'on':''}"></span><strong>${esc(a?.name||'Player')}</strong><small>${a?.points||0} pts</small></div><b>VS</b><div><span class="presence ${b?.connected?'on':''}"></span><strong>${esc(b?.name||'Player')}</strong><small>${b?.points||0} pts</small></div></div>`:`<div class="empty-court">Waiting for two players</div>`}</button>`}).join('');
+    appEl.innerHTML=this.shell(`<section class="matchup-wrap"><div class="matchup-title"><div><span class="eyebrow">KING OF THE COURT</span><h2>${game.symbol} ${esc(game.title)}</h2><p>Winner moves right · Loser moves left · Every win = +1 match point</p></div>${this.me?.isHost?`<div class="host-match-actions">${room.phase==='matchups'?'<button id="begin" class="primary">BEGIN MATCHUPS</button>':''}<button id="return-lobby" class="secondary">RETURN TO LOBBY</button></div>`:''}</div><div class="courts-scroll">${courts}</div><section class="score-strip"><div class="score-label">MATCH POINTS</div>${ranked.map(p=>`<div class="score-tile ${p.id===champion?'champ':''}">${p.id===champion?'👑 ':''}<strong>${esc(p.name)}</strong><span>${p.points}</span></div>`).join('')}</section><div class="spectator-tip">Tap any live court to spectate. Waiting players automatically enter their next match when an opponent is ready.</div></section>`,'matchup-screen');
+    this.bindCommon();document.querySelector('#begin')?.addEventListener('click',()=>this.net.send({type:'begin-matchups'}));document.querySelector('#return-lobby')?.addEventListener('click',()=>this.net.send({type:'return-lobby'}));document.querySelectorAll<HTMLElement>('[data-watch]').forEach(el=>el.addEventListener('click',()=>{this.spectatingMatchId=el.dataset.watch;this.render()}));
+  }
+  renderGame(match:MatchState,spectator:boolean){
+    const game=GAME_BY_ID.get(match.precision?.gameId||this.room!.selectedGameId)||this.selectedGame;const a=this.player(match.playerIds[0]),b=this.player(match.playerIds[1]);const champ=match.courtIndex===this.room!.courts.length-1;
+    if(match.status==='countdown'){
+      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div></div><div class="countdown-card"><small>NEXT MATCHUP STARTS</small><div id="countdown-number">3</div><h3>${esc(a?.name)} <span>VS</span> ${esc(b?.name)}</h3><p>${esc(game.tagline)}</p></div></section>`,'game-screen');this.bindCommon();return;
+    }
+    const precision=match.precision;
+    if(!precision){appEl.innerHTML=this.shell(`<div class="loading-card">Preparing challenge…</div>`);this.bindCommon();return;}
+    if(precision.phase==='results'){
+      const winner=this.player(precision.winnerId);const ra=precision.results[match.playerIds[0]],rb=precision.results[match.playerIds[1]];
+      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="result-card"><span class="eyebrow">${game.title.toUpperCase()} RESULT</span><div class="trophy">🏆</div><h2>${esc(winner?.name)} WINS</h2><div class="result-versus"><div><strong>${esc(a?.name)}</strong><span>${esc(ra?.display||'—')}</span></div><b>VS</b><div><strong>${esc(b?.name)}</strong><span>${esc(rb?.display||'—')}</span></div></div><div class="move-right">+1 MATCH POINT · WINNER MOVES RIGHT →</div></div></section>`,'game-screen');this.bindCommon();sound.beep(760,.12);return;
+    }
+    appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${spectator?'👁 SPECTATING':champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div><div class="game-nav">${spectator?'<button id="back-matchups" class="secondary small">← MATCHUPS</button>':'<button id="view-matchups" class="secondary small">VIEW MATCHUPS</button>'}</div></div><div id="precision-stage" class="precision-stage"></div></section>`,'game-screen');
+    this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.spectatingMatchId=undefined;this.render()});document.querySelector('#view-matchups')?.addEventListener('click',()=>{this.spectatingMatchId=undefined;this.renderMatchups()});
+    const myId=this.session!.playerId;const isParticipant=match.playerIds.includes(myId);if(!spectator&&isParticipant&&!precision.results[myId]){this.controller=new PrecisionController(this,match,precision,game);this.controller.start();}else this.renderPrecisionWatcher(match,precision,game,spectator);
+  }
+  renderPrecisionWatcher(match:MatchState,p:PrecisionState,game:GameDefinition,spectator:boolean){
+    const stage=document.querySelector<HTMLElement>('#precision-stage');if(!stage)return;const cells=match.playerIds.map(id=>{const pl=this.player(id),r=p.results[id],prog=p.progress[id];return `<div class="watch-player"><span class="presence ${pl?.connected?'on':''}"></span><h3>${esc(pl?.name)}</h3>${r?`<div class="submitted">✓ FINISHED<strong>${esc(r.display)}</strong></div>`:`<div class="live-progress"><strong>${esc(prog?.label||'PLAYING')}</strong><span>${prog?.round?`Round ${prog.round}`:'In progress…'}</span>${typeof prog?.value==='number'?`<em>${game.id==='lights-out'?(prog.value/1000).toFixed(3)+' s':(prog.value/1000).toFixed(2)+' s error'}</em>`:''}</div>`}</div>`}).join('');stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${game.symbol}</div><h2>${spectator?'LIVE SPECTATOR':'RESULT SUBMITTED'}</h2><p>${spectator?'This is a read-only live view.':'Waiting for your opponent to finish.'}</p><div class="watch-grid">${cells}</div></div>`;
+  }
+  tick(){
+    const num=document.querySelector<HTMLElement>('#countdown-number');if(num&&this.room){const m=this.activeMatchFor(this.session?.playerId)||this.findMatch(this.spectatingMatchId);if(m?.startsAt){const n=Math.max(1,Math.ceil((m.startsAt-Date.now())/1000));num.textContent=String(n)}}
+    const pause=this.room&&this.activeMatchFor(this.session?.playerId)?.disconnectPause;if(pause){const pl=this.player(pause.playerId);this.showPersistentNotice(`${pl?.name||'Player'} disconnected — waiting up to ${Math.max(0,Math.ceil((pause.graceUntil-Date.now())/1000))}s to reconnect`)}else this.clearPersistentNotice();
+  }
+  toast(msg:string,type='info'){let el=document.querySelector<HTMLElement>('#toast');if(!el){el=document.createElement('div');el.id='toast';document.body.appendChild(el)}el.className=`toast ${type}`;el.textContent=msg;el.classList.add('show');setTimeout(()=>el?.classList.remove('show'),3600)}
+  showPersistentNotice(msg:string){let el=document.querySelector<HTMLElement>('#persistent');if(!el){el=document.createElement('div');el.id='persistent';document.body.appendChild(el)}el.textContent=msg;el.className='persistent show';}
+  clearPersistentNotice(){document.querySelector('#persistent')?.classList.remove('show')}
+}
+
+class PrecisionController{
+  app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
+  constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();}
+  destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
+  sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
+  stage(){return document.querySelector<HTMLElement>('#precision-stage')}
+  sendProgress(round:number,label:string,value?:number){this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value});}
+  sendResult(score:number,secondary:number,display:string,rounds:number[]){this.running=false;this.app.net.send({type:'precision-result',matchId:this.matchId,score,secondary,display,rounds});const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT SUBMITTED</h2><p>Waiting for your opponent to finish…</p><div class="spinner"></div></div>`;}
+  async runLightsOut(){
+    const stage=this.stage();if(!stage)return;const scores:number[]=[];stage.innerHTML=`<div class="lights-game"><div class="trial-label">START <span id="trial-no">1</span> / 5</div><div class="f1-lights">${Array.from({length:5},(_,i)=>`<div class="light-stack"><span class="red-light" data-light="${i}"></span><span class="red-light dim"></span></div>`).join('')}</div><div id="reaction-message" class="reaction-message">WAIT FOR LIGHTS OUT</div><button id="reaction-pad" class="reaction-pad">WAIT…<small>Tap here the instant the lights go out</small></button><div id="reaction-history" class="reaction-history"></div></div>`;
+    const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
+    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:number)=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='waiting'){phase='locked';resolveTap(1000);sound.beep(180,.14)}else if(phase==='go'){phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap(rt);sound.beep(820,.06)}});
+    await sleep(800);
+    for(let trial=0;trial<5&&!this.destroyed;trial++){
+      trialEl.textContent=String(trial+1);document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go','false');pad.innerHTML='WAIT…<small>Do not anticipate</small>';msg.textContent='LIGHTS BUILDING';phase='waiting';
+      for(let i=0;i<5;i++){await sleep(300);if(this.destroyed)return;document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);}
+      const delay=650+seededUnit(this.state.seed,trial)*1800;
+      const resultPromise=new Promise<number>(r=>resolveTap=r);
+      const outPromise=(async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
+      void outPromise;
+      const reaction=await resultPromise;if(this.destroyed)return;scores.push(Math.round(reaction));
+      if(reaction>=1000){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>1.000 s penalty</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
+      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${v>=1000?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,reaction>=1000?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
+    }
+    if(this.destroyed)return;const med=median(scores),falseStarts=scores.filter(v=>v>=1000).length,penalty=falseStarts*200,finalScore=med+penalty,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(finalScore,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` + ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
+  }
+  async runTimeStop(){
+    const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const stage=this.stage();if(!stage)return;
+    stage.innerHTML=`<div class="time-game"><div class="trial-label">TARGET <span id="time-round">1</span> / 3</div><div class="target-box"><small>STOP AT</small><strong id="target-time">${targets[0].toFixed(2)}</strong><em>SECONDS</em></div><div id="clock-display" class="clock-display">READY</div><button id="time-pad" class="time-pad">READY<small>Tap to begin the round</small></button><div id="time-history" class="reaction-history"></div></div>`;
+    const roundEl=document.querySelector<HTMLElement>('#time-round')!,targetEl=document.querySelector<HTMLElement>('#target-time')!,clock=document.querySelector<HTMLElement>('#clock-display')!,pad=document.querySelector<HTMLButtonElement>('#time-pad')!,history=document.querySelector<HTMLElement>('#time-history')!;
+    let phase:'ready'|'countdown'|'running'|'locked'='ready',startAt=0,resolveStop:(v:number)=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='ready'){phase='countdown';void beginCountdown();}else if(phase==='running'){phase='locked';resolveStop(performance.now()-startAt);sound.beep(760,.07)}});
+    const beginCountdown=async()=>{for(const n of [3,2,1]){clock.textContent=String(n);pad.innerHTML=`${n}<small>Get ready</small>`;sound.beep(360+n*80,.05);await sleep(600);if(this.destroyed)return;}clock.textContent='0.00';pad.innerHTML='STOP<small>Tap when you reach the target</small>';pad.classList.add('stop');startAt=performance.now();phase='running';const animate=()=>{if(this.destroyed||phase!=='running')return;const e=performance.now()-startAt;clock.textContent=e<1000?(e/1000).toFixed(2):'?.??';this.raf=requestAnimationFrame(animate)};animate();};
+    for(let i=0;i<3&&!this.destroyed;i++){
+      roundEl.textContent=String(i+1);targetEl.textContent=targets[i].toFixed(2);clock.textContent='READY';pad.classList.remove('stop');pad.innerHTML='READY<small>Tap to begin the round</small>';phase='ready';
+      const elapsedMs=await new Promise<number>(r=>resolveStop=r);if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);const measured=Math.round((elapsedMs/1000)*100)/100;const err=Math.round(Math.abs(measured-targets[i])*1000);errors.push(err);clock.textContent=`${measured.toFixed(2)} s`;pad.classList.remove('stop');pad.innerHTML=`ERROR ${(err/1000).toFixed(2)} s<small>Target ${targets[i].toFixed(2)} s</small>`;history.innerHTML=errors.map((v,j)=>`<span>${j+1}: +${(v/1000).toFixed(2)} s</span>`).join('');this.sendProgress(i+1,'TIMING ERROR',err);sound.beep(err<=30?900:err<=100?650:420,.08);await sleep(1200);
+    }
+    if(this.destroyed)return;const total=errors.reduce((a,b)=>a+b,0),worst=Math.max(...errors);this.sendResult(total,worst,`${(total/1000).toFixed(2)} s total error`,errors);
+  }
+}
+
+new MinuteApp();
