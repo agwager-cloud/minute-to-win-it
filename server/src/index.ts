@@ -335,6 +335,8 @@ type ClientContext = {
   roomCode?: string;
   playerId?: string;
   deviceId?: string;
+  spectatingMatchId?: string;
+  spectatingPlayerId?: string;
 };
 
 type ClientMessage =
@@ -349,6 +351,9 @@ type ClientMessage =
   | { type: 'resolve-match'; matchId: string; winnerId: string }
   | { type: 'precision-progress'; matchId: string; round: number; label: string; value?: number }
   | { type: 'precision-result'; matchId: string; score: number; secondary?: number; display: string; rounds?: number[] }
+  | { type: 'spectate-match'; matchId: string; povPlayerId?: string }
+  | { type: 'stop-spectating' }
+  | { type: 'spectator-frame'; matchId: string; sequence: number; capturedAt: number; html: string; canvases?: Array<{ index: number; width: number; height: number; dataUrl: string }> }
   | { type: 'three-hexagon-move'; matchId: string; action: ThreeHexagonAction }
   | { type: 'four-star-move'; matchId: string; action: FourStarAction }
   | { type: 'boxes-move'; matchId: string; action: BoxesAction }
@@ -430,6 +435,87 @@ function broadcastRoom(room: Room) {
   }
 }
 
+function spectatorSockets(room: Room, matchId: string, povPlayerId: string) {
+  const result: WebSocket[] = [];
+  for (const player of room.players.values()) {
+    const ws = socketsByPlayer.get(player.id);
+    if (!ws || ws.readyState !== WebSocket.OPEN) continue;
+    const ctx = contexts.get(ws);
+    if (ctx?.spectatingMatchId === matchId && ctx.spectatingPlayerId === povPlayerId) result.push(ws);
+  }
+  return result;
+}
+
+function refreshSpectatorStreamRequest(room: Room, matchId: string, povPlayerId: string) {
+  const player = room.players.get(povPlayerId);
+  if (!player || player.isBot) return;
+  const ws = socketsByPlayer.get(povPlayerId);
+  if (!ws) return;
+  send(ws, { type: 'spectator-stream-request', matchId, active: spectatorSockets(room, matchId, povPlayerId).length > 0 });
+}
+
+function clearSpectatorSubscription(ws: WebSocket) {
+  const ctx = contexts.get(ws);
+  if (!ctx?.roomCode || !ctx.spectatingMatchId || !ctx.spectatingPlayerId) return;
+  const room = rooms.get(ctx.roomCode);
+  const oldMatchId = ctx.spectatingMatchId;
+  const oldPlayerId = ctx.spectatingPlayerId;
+  ctx.spectatingMatchId = undefined;
+  ctx.spectatingPlayerId = undefined;
+  if (room) refreshSpectatorStreamRequest(room, oldMatchId, oldPlayerId);
+}
+
+function setSpectatorSubscription(ws: WebSocket, room: Room, matchId: string, povPlayerId: string) {
+  const ctx = contexts.get(ws);
+  if (!ctx) return;
+  const oldMatchId = ctx.spectatingMatchId;
+  const oldPlayerId = ctx.spectatingPlayerId;
+  if (oldMatchId === matchId && oldPlayerId === povPlayerId) {
+    refreshSpectatorStreamRequest(room, matchId, povPlayerId);
+    return;
+  }
+  ctx.spectatingMatchId = undefined;
+  ctx.spectatingPlayerId = undefined;
+  if (oldMatchId && oldPlayerId) refreshSpectatorStreamRequest(room, oldMatchId, oldPlayerId);
+  ctx.spectatingMatchId = matchId;
+  ctx.spectatingPlayerId = povPlayerId;
+  refreshSpectatorStreamRequest(room, matchId, povPlayerId);
+}
+
+function refreshSpectatorRequestsForPlayer(room: Room, playerId: string) {
+  for (const court of room.courts) {
+    const match = court.activeMatch;
+    if (match?.playerIds.includes(playerId)) refreshSpectatorStreamRequest(room, match.id, playerId);
+  }
+}
+
+function forwardSpectatorFrame(room: Room, ws: WebSocket, msg: Extract<ClientMessage, { type: 'spectator-frame' }>) {
+  const ctx = contexts.get(ws);
+  if (!ctx?.playerId) return;
+  const live = findLiveMatch(room, String(msg.matchId));
+  if (!live || live.match.status !== 'playing' || !live.match.playerIds.includes(ctx.playerId)) return;
+  if (room.players.get(ctx.playerId)?.isBot) return;
+  const watchers = spectatorSockets(room, live.match.id, ctx.playerId);
+  if (!watchers.length) return;
+  const html = typeof msg.html === 'string' ? msg.html : '';
+  if (!html || html.length > 180_000) return;
+  const sequence = Math.max(0, Math.floor(Number(msg.sequence) || 0));
+  const capturedAt = Math.max(0, Math.floor(Number(msg.capturedAt) || Date.now()));
+  const canvases = Array.isArray(msg.canvases) ? msg.canvases.slice(0, 3).flatMap((canvas) => {
+    const dataUrl = typeof canvas?.dataUrl === 'string' ? canvas.dataUrl : '';
+    if (!/^data:image\/(?:png|webp);base64,[a-z0-9+/=]+$/i.test(dataUrl) || dataUrl.length > 450_000) return [];
+    return [{
+      index: Math.max(0, Math.min(2, Math.floor(Number(canvas.index) || 0))),
+      width: Math.max(1, Math.min(4096, Math.floor(Number(canvas.width) || 1))),
+      height: Math.max(1, Math.min(4096, Math.floor(Number(canvas.height) || 1))),
+      dataUrl,
+    }];
+  }) : [];
+  if (canvases.reduce((sum, canvas) => sum + canvas.dataUrl.length, 0) > 900_000) return;
+  const frame = { matchId: live.match.id, playerId: ctx.playerId, html, canvases, sequence, capturedAt, serverReceivedAt: Date.now() };
+  for (const spectator of watchers) send(spectator, { type: 'spectator-frame', frame });
+}
+
 function getRoomFor(ws: WebSocket) {
   const ctx = contexts.get(ws);
   if (!ctx?.roomCode || !ctx.playerId) return undefined;
@@ -478,6 +564,7 @@ function attachPlayer(ws: WebSocket, room: Room, player: Player) {
     isHost: player.isHost,
   });
   broadcastRoom(room);
+  refreshSpectatorRequestsForPlayer(room, player.id);
 }
 
 function createPlayer(name: string, deviceId: string, isHost: boolean): Player {
@@ -561,33 +648,44 @@ function prepareCourts(room: Room) {
   const host = room.players.get(room.hostId);
   if (!host?.connected) throw new Error('The host must be connected to create matchups.');
 
-  // Practice bots exist only for the special host-alone test path.
+  // Remove any old parity/practice bots before building a fresh ladder.
   for (const [id, player] of room.players) {
     if (player.isBot) room.players.delete(id);
   }
 
-  const students = [...room.players.values()].filter((p) => !p.isHost && !p.isBot && p.connected);
-  let participants: Player[];
+  const students = shuffled([...room.players.values()].filter((p) => !p.isHost && !p.isBot && p.connected));
+  room.courts = [];
 
   if (students.length === 0) {
+    // Keep the proven solo host test path, but the host is never used as a
+    // classroom parity filler once real students are present.
     const bot = createPracticeBot();
     room.players.set(bot.id, bot);
     room.hostParticipating = true;
-    participants = [host, bot];
+    room.courts.push({ index: 0, activeMatch: makeMatch(0, host.id, bot.id, 'ready'), waiting: [] });
   } else {
-    room.hostParticipating = students.length % 2 === 1;
-    participants = room.hostParticipating ? [...students, host] : students;
-  }
+    room.hostParticipating = false;
+    let courtIndex = 0;
 
-  const order = shuffled(participants.map((p) => p.id));
-  room.courts = [];
-  for (let i = 0; i < order.length; i += 2) {
-    const courtIndex = i / 2;
-    room.courts.push({
-      index: courtIndex,
-      activeMatch: makeMatch(courtIndex, order[i], order[i + 1], 'ready'),
-      waiting: [],
-    });
+    // For an odd class, keep the teacher free to manage/spectate and place a
+    // Minute Bot on the LOWEST court. The first late student can replace that
+    // bot cleanly without disturbing any higher court.
+    if (students.length % 2 === 1) {
+      const bot = createPracticeBot();
+      room.players.set(bot.id, bot);
+      const lowStudent = students.shift()!;
+      room.courts.push({ index: courtIndex, activeMatch: makeMatch(courtIndex, lowStudent.id, bot.id, 'ready'), waiting: [] });
+      courtIndex += 1;
+    }
+
+    for (let i = 0; i < students.length; i += 2) {
+      room.courts.push({
+        index: courtIndex,
+        activeMatch: makeMatch(courtIndex, students[i].id, students[i + 1].id, 'ready'),
+        waiting: [],
+      });
+      courtIndex += 1;
+    }
   }
   room.phase = 'matchups';
 }
@@ -4270,91 +4368,84 @@ function reindexCourts(room: Room) {
   });
 }
 
-function createNewLowestHostMatch(room: Room, latePlayerId: string) {
-  const court: Court = {
-    index: 0,
-    activeMatch: makeMatch(0, room.hostId, latePlayerId, 'ready'),
-    waiting: [],
-  };
+function createNewLowestLateMatch(room: Room, a: string, b: string) {
+  const court: Court = { index: 0, activeMatch: makeMatch(0, a, b, 'ready'), waiting: [] };
   room.courts.unshift(court);
   reindexCourts(room);
-  room.hostParticipating = true;
-
-  if (room.phase === 'playing' && court.activeMatch) {
-    scheduleMatchStart(room, court, court.activeMatch);
-  }
+  if (room.phase === 'playing' && court.activeMatch) scheduleMatchStart(room, court, court.activeMatch);
 }
 
-function replaceWaitingHostWithLateJoiner(room: Room, latePlayerId: string) {
-  const court = playerWaitingCourt(room, room.hostId);
+function replaceIdleBotWithLateJoiner(room: Room, latePlayerId: string) {
+  const court = room.courts[0];
   if (!court) return false;
-  const hostIndex = court.waiting.indexOf(room.hostId);
-  if (hostIndex < 0) return false;
-  court.waiting[hostIndex] = latePlayerId;
-  room.hostParticipating = false;
-  tryStartWaitingMatches(room);
-  return true;
+  const match = court.activeMatch;
+  const botId = match?.playerIds.find((id) => room.players.get(id)?.isBot);
+  if (match && botId && (match.status === 'ready' || match.status === 'countdown')) {
+    const humanId = match.playerIds.find((id) => id !== botId);
+    if (!humanId) return false;
+    room.players.delete(botId);
+    // Replace the whole match so any old countdown timer is invalidated by ID.
+    const next = makeMatch(court.index, humanId, latePlayerId, 'ready');
+    court.activeMatch = next;
+    if (room.phase === 'playing') scheduleMatchStart(room, court, next);
+    return true;
+  }
+  const waitingBotIndex = court.waiting.findIndex((id) => room.players.get(id)?.isBot);
+  if (waitingBotIndex >= 0) {
+    const bot = court.waiting[waitingBotIndex];
+    court.waiting[waitingBotIndex] = latePlayerId;
+    room.players.delete(bot);
+    tryStartWaitingMatches(room);
+    return true;
+  }
+  return false;
+}
+
+function connectedLateJoinerCount(room: Room) {
+  return room.lateJoinQueue.filter((id) => {
+    const player = room.players.get(id);
+    return Boolean(player && !player.isHost && !player.isBot && player.connected);
+  }).length;
 }
 
 function integrateLateJoiners(room: Room) {
   if (room.phase === 'lobby') return;
+  if (room.hostParticipating && playerActiveMatch(room, room.hostId) && connectedLateJoinerCount(room) > 0) room.hostExitAfterMatch = true;
 
-  // Late students never interrupt a live/ready host match. They spectate until
-  // the teacher's current match reaches a clean boundary. If the teacher is
-  // already waiting between matches, that waiting position is safe to hand over.
-  while (true) {
-    if (room.hostParticipating) {
-      if (playerActiveMatch(room, room.hostId)) return;
+  // First priority: replace a parity bot on the lowest court. This lets a single
+  // late student enter immediately without making the teacher play.
+  while (connectedLateJoinerCount(room) > 0) {
+    const next = takeNextConnectedLateJoiner(room);
+    if (!next) break;
+    if (replaceIdleBotWithLateJoiner(room, next)) continue;
+    room.lateJoinQueue.unshift(next);
+    break;
+  }
 
-      const replacement = takeNextConnectedLateJoiner(room);
-      if (!replacement) return;
-      if (replaceWaitingHostWithLateJoiner(room, replacement)) {
-        // The host is now free. If another late student is already queued, the
-        // next loop can create a fresh lowest-ranked Host vs Student match.
-        continue;
-      }
-
-      // Defensive recovery: if the host is marked as participating but is no
-      // longer on any court, treat them as a spectator and reconcile normally.
-      room.hostParticipating = false;
-      room.lateJoinQueue.unshift(replacement);
-      continue;
+  // Remaining late students pair with EACH OTHER. Every new pair gets a brand
+  // new lowest court, so nobody jumps into the middle of the ladder and the host
+  // remains completely free to manage and spectate.
+  while (connectedLateJoinerCount(room) >= 2) {
+    const a = takeNextConnectedLateJoiner(room);
+    const b = takeNextConnectedLateJoiner(room);
+    if (!a || !b) {
+      if (a) room.lateJoinQueue.unshift(a);
+      if (b) room.lateJoinQueue.unshift(b);
+      break;
     }
-
-    const latePlayerId = takeNextConnectedLateJoiner(room);
-    if (!latePlayerId) return;
-
-    // With an even number of active students the teacher is spectating. The next
-    // late student therefore pairs with the teacher on a brand-new lowest desk.
-    createNewLowestHostMatch(room, latePlayerId);
-    return;
+    createNewLowestLateMatch(room, a, b);
   }
 }
 
-
 function rebalanceHostAfterRemoval(room: Room) {
-  const host = room.players.get(room.hostId);
-  if (!host?.connected || room.phase === 'lobby') return;
-  const connectedStudents = [...room.players.values()].filter((p) => !p.isHost && !p.isBot && p.connected);
-  const shouldHostParticipate = connectedStudents.length % 2 === 1;
-
-  if (shouldHostParticipate) {
-    room.hostExitAfterMatch = false;
-    if (room.hostParticipating) return;
-    room.hostParticipating = true;
-    if (!playerActiveMatch(room, room.hostId) && !playerWaitingCourt(room, room.hostId) && room.courts.length) {
-      room.courts[0].waiting.push(room.hostId);
-    }
-    return;
-  }
-
-  if (!room.hostParticipating) return;
+  if (room.phase === 'lobby') return;
+  // Classroom host is an observer/manager. Never insert the teacher as a parity
+  // player because a removal changed the class from even to odd.
   const active = playerActiveMatch(room, room.hostId);
   if (active) {
     room.hostExitAfterMatch = true;
     return;
   }
-
   for (const court of room.courts) court.waiting = court.waiting.filter((id) => id !== room.hostId);
   room.hostParticipating = false;
   room.hostExitAfterMatch = false;
@@ -4424,22 +4515,31 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
   const lastCourt = room.courts.length - 1;
   const winner = room.players.get(winnerId);
   if (winner) winner.points += 1;
-  if (court.index === lastCourt) room.currentChampionId = winnerId;
+  if (court.index === lastCourt && winner && !winner.isBot) room.currentChampionId = winnerId;
 
-  // Solo practice is a special case. If a real student joins while Host vs Gem
-  // Bot is running, let the practice match finish, remove the bot, then start the
-  // real Host vs Student court.
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
+  const humanId = botId ? match.playerIds.find((id) => id !== botId) : undefined;
   if (botId) {
-    const latePlayerId = takeNextConnectedLateJoiner(room);
-    if (latePlayerId) {
+    const latePlayerId = court.index === 0 ? takeNextConnectedLateJoiner(room) : undefined;
+    if (latePlayerId && humanId) {
       court.activeMatch = undefined;
-      court.waiting = court.waiting.filter((id) => id !== botId);
-      room.players.delete(botId);
-      room.hostParticipating = true;
-      const nextMatch = makeMatch(court.index, room.hostId, latePlayerId, 'ready');
-      court.activeMatch = nextMatch;
-      scheduleMatchStart(room, court, nextMatch);
+      court.waiting = court.waiting.filter((id) => id !== botId && id !== humanId);
+      if (humanId === room.hostId) {
+        // A student arrived during solo Host vs Bot testing. Keep the bot as the
+        // student's temporary opponent and release the teacher to spectate/manage.
+        room.hostParticipating = false;
+        room.hostExitAfterMatch = false;
+        const nextMatch = makeMatch(court.index, latePlayerId, botId, 'ready');
+        court.activeMatch = nextMatch;
+        scheduleMatchStart(room, court, nextMatch);
+      } else {
+        // Odd-class parity bot lives on the lowest court. The first late student
+        // replaces it at this clean match boundary.
+        room.players.delete(botId);
+        const nextMatch = makeMatch(court.index, humanId, latePlayerId, 'ready');
+        court.activeMatch = nextMatch;
+        scheduleMatchStart(room, court, nextMatch);
+      }
       broadcastRoom(room);
       return;
     }
@@ -4447,34 +4547,31 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
 
   const winnerDestination = Math.min(lastCourt, court.index + 1);
   const loserDestination = Math.max(0, court.index - 1);
-
-  // If the teacher is currently part of the King-of-the-Court rotation and a
-  // late student is waiting, the late student takes the teacher's *position* at
-  // this match boundary. Points remain attached to the teacher's own Player
-  // record; the late student's score remains the zero they joined with.
-  const hostReplacementId = match.playerIds.includes(room.hostId)
-    ? takeNextConnectedLateJoiner(room)
-    : undefined;
-
   court.activeMatch = undefined;
 
   const routePlayer = (playerId: string, destination: number) => {
-    if (playerId === room.hostId && hostReplacementId) {
-      room.courts[destination].waiting.push(hostReplacementId);
-      room.hostParticipating = false;
-      room.hostExitAfterMatch = false;
-      return;
-    }
+    const player = room.players.get(playerId);
+    if (!player) return;
     if (playerId === room.hostId && room.hostExitAfterMatch) {
       room.hostParticipating = false;
       room.hostExitAfterMatch = false;
       return;
     }
-    room.courts[destination].waiting.push(playerId);
+    // Parity bots never climb the ladder. Keep them on the lowest court so a
+    // future late student always enters at the bottom as requested.
+    const target = player.isBot ? 0 : destination;
+    if (room.courts[target] && !room.courts[target].waiting.includes(playerId)) room.courts[target].waiting.push(playerId);
   };
 
   routePlayer(winnerId, winnerDestination);
   routePlayer(loserId, loserDestination);
+
+  // If solo practice ended because real students arrived and there is no host
+  // left for the bot to face, remove the now-orphaned bot cleanly.
+  if (botId && humanId === room.hostId && !room.hostParticipating) {
+    for (const c of room.courts) c.waiting = c.waiting.filter((id) => id !== botId);
+    room.players.delete(botId);
+  }
 
   tryStartWaitingMatches(room);
   integrateLateJoiners(room);
@@ -4663,6 +4760,34 @@ wss.on('connection', (ws) => {
         return;
       }
 
+      if (msg.type === 'spectate-match') {
+        const result = getRoomFor(ws);
+        if (!result) throw new Error('You are not connected to a room.');
+        const { room, ctx } = result;
+        const live = findLiveMatch(room, String(msg.matchId));
+        if (!live || !ctx.playerId) throw new Error('That court is no longer live.');
+        const viewer = room.players.get(ctx.playerId);
+        if (!viewer?.isHost && playerActiveMatch(room, ctx.playerId)) throw new Error('Finish your own match before spectating another court.');
+        const humanPovs = live.match.playerIds.filter((id) => !room.players.get(id)?.isBot);
+        const requested = String(msg.povPlayerId || '');
+        const povPlayerId = humanPovs.includes(requested) ? requested : humanPovs[0];
+        if (!povPlayerId) throw new Error('That court does not have a live player view available.');
+        setSpectatorSubscription(ws, room, live.match.id, povPlayerId);
+        return;
+      }
+
+      if (msg.type === 'stop-spectating') {
+        clearSpectatorSubscription(ws);
+        return;
+      }
+
+      if (msg.type === 'spectator-frame') {
+        const result = getRoomFor(ws);
+        if (!result) return;
+        forwardSpectatorFrame(result.room, ws, msg);
+        return;
+      }
+
       if (msg.type === 'precision-progress') {
         const result = getRoomFor(ws);
         if (!result) throw new Error('You are not connected to a room.');
@@ -4840,6 +4965,7 @@ wss.on('connection', (ws) => {
 
   ws.on('close', () => {
     const ctx = contexts.get(ws);
+    clearSpectatorSubscription(ws);
     if (ctx?.deviceId && activeDevices.get(ctx.deviceId) === ws) activeDevices.delete(ctx.deviceId);
     if (!ctx?.roomCode || !ctx.playerId) return;
 
