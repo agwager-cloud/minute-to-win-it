@@ -281,6 +281,7 @@ type PrecisionState = {
   progress: Record<string, PrecisionProgress>;
   winnerId?: string;
   resultRevealAt?: number;
+  ricochetRound?: number;
 };
 
 type Match = {
@@ -3502,6 +3503,66 @@ function makeTimeStopTargets(seed: number) {
   return targets;
 }
 
+function scheduleRicochetRoundWatchdog(room: Room, match: Match, expectedRound: number) {
+  const expectedMatchId = match.id;
+  setTimeout(() => {
+    const live = findLiveMatch(room, expectedMatchId);
+    const state = live?.match.precision;
+    if (!live || !state || state.phase !== 'playing' || state.gameId !== 'ricochet' || (state.ricochetRound ?? 0) !== expectedRound) return;
+    for (const playerId of live.match.playerIds) {
+      if (state.results[playerId]) continue;
+      try {
+        submitPrecisionResult(room, live.court, live.match, playerId, {
+          score: 0,
+          secondary: 100000,
+          display: `0 / 1000 pts · ${expectedRound > 0 ? `shootout ${expectedRound} · ` : ''}server timeout`,
+          rounds: [0],
+        });
+      } catch { /* match may have advanced while the watchdog was running */ }
+    }
+  }, 24000);
+}
+
+function scheduleRicochetBotRound(room: Room, match: Match, expectedRound: number) {
+  const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
+  if (!botId) return;
+  const expectedMatchId = match.id;
+  setTimeout(() => {
+    const live = findLiveMatch(room, expectedMatchId);
+    const state = live?.match.precision;
+    if (!live || !state || state.phase !== 'playing' || state.gameId !== 'ricochet' || (state.ricochetRound ?? 0) !== expectedRound || state.results[botId]) return;
+    const shieldEase = Math.min(120, expectedRound * 28);
+    const score = Math.random() < Math.max(.04, .14 - expectedRound * .02)
+      ? Math.round(180 + Math.random() * 320)
+      : Math.min(1000, Math.round(610 + shieldEase + Math.random() * Math.max(80, 351 - shieldEase)));
+    const missPx = Math.max(4, Math.round((1000 - score) / 7.4 + Math.random() * 8));
+    const bounceCount = 1 + Math.floor(Math.random() * 3);
+    try {
+      submitPrecisionResult(room, live.court, live.match, botId, {
+        score,
+        secondary: Math.min(100000, missPx * 100),
+        display: `${score} / 1000 pts · ${missPx} px miss · ${bounceCount} bounce${bounceCount === 1 ? '' : 's'}${expectedRound ? ` · shootout ${expectedRound}` : ''}`,
+        rounds: [score],
+      });
+    } catch { /* match may have advanced while the bot timer was running */ }
+  }, 7200);
+}
+
+function beginRicochetShootout(room: Room, court: Court, match: Match) {
+  const state = match.precision;
+  if (!state || state.gameId !== 'ricochet' || state.phase !== 'playing') return;
+  const nextRound = (state.ricochetRound ?? 0) + 1;
+  state.ricochetRound = nextRound;
+  state.results = {};
+  state.progress = {};
+  state.winnerId = undefined;
+  state.resultRevealAt = undefined;
+  match.winnerId = undefined;
+  broadcastRoom(room);
+  scheduleRicochetRoundWatchdog(room, match, nextRound);
+  scheduleRicochetBotRound(room, match, nextRound);
+}
+
 function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   const state = match.precision;
   if (!state || state.phase !== 'playing') return;
@@ -3509,6 +3570,13 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   const ra = state.results[a];
   const rb = state.results[b];
   if (!ra || !rb) return;
+
+  // Ricochet draws trigger another one-shot shootout instead of using a
+  // random or closest-miss tiebreak. Each draw makes the shield 20% shorter.
+  if (state.gameId === 'ricochet' && ra.score === rb.score) {
+    beginRicochetShootout(room, court, match);
+    return;
+  }
 
   let winnerId: string;
   const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet';
@@ -3607,6 +3675,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
     targets: room.selectedGameId === 'time-stop' ? makeTimeStopTargets(seed) : undefined,
     results: {},
     progress: {},
+    ricochetRound: room.selectedGameId === 'ricochet' ? 0 : undefined,
   };
   broadcastRoom(room);
 
@@ -3753,26 +3822,10 @@ function startPrecision(room: Room, court: Court, match: Match) {
   }
 
   // One Shot Ricochet gives the player 12 seconds to aim, then auto-fires.
-  // This watchdog covers a suspended/throttled browser so the single-shot
-  // challenge can never leave the opponent waiting indefinitely.
+  // Every draw creates a new shootout round, so each round gets its own
+  // round-aware watchdog and older timers cannot affect later shootouts.
   if (room.selectedGameId === 'ricochet') {
-    const expectedMatchId = match.id;
-    setTimeout(() => {
-      const live = findLiveMatch(room, expectedMatchId);
-      const state = live?.match.precision;
-      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'ricochet') return;
-      for (const playerId of live.match.playerIds) {
-        if (state.results[playerId]) continue;
-        try {
-          submitPrecisionResult(room, live.court, live.match, playerId, {
-            score: 0,
-            secondary: 100000,
-            display: '0 / 1000 pts · server timeout',
-            rounds: [0],
-          });
-        } catch { /* match may have resolved while watchdog was running */ }
-      }
-    }, 24000);
+    scheduleRicochetRoundWatchdog(room, match, 0);
   }
 
   // Parry is also completely self-advancing, but a suspended browser can
