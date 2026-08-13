@@ -34,6 +34,7 @@ type Session={roomCode:string;playerId:string;resumeToken:string;isHost:boolean}
 
 class MinuteApp{
   room?:RoomState; session?:Session; status:'connecting'|'online'|'offline'='connecting'; statusDetail=''; message=''; spectatingMatchId?:string;
+  private presenceRepairAt=0;
   controller?:PrecisionController;
   net:NetworkClient;
   constructor(){
@@ -59,6 +60,16 @@ class MinuteApp{
   findMatch(id?:string){if(!id||!this.room)return undefined;for(const c of this.room.courts)if(c.activeMatch?.id===id)return c.activeMatch;return undefined}
   onRoomState(r:RoomState){
     this.room=r;
+    // Defensive recovery for the same reconnect/presence race we hardened in
+    // Dodeca-Gems: if this browser has a healthy socket but the authoritative
+    // room snapshot says *this* player is offline, force a clean resume. This
+    // prevents an older replaced socket from leaving an iPad/phone greyed out.
+    const me=r.players.find(p=>p.id===this.session?.playerId);
+    if(me&&!me.connected&&this.net.isOnline()&&Date.now()-this.presenceRepairAt>4000){
+      this.presenceRepairAt=Date.now();
+      this.net.repairRoomSession();
+      return;
+    }
     const live=this.controller?this.findMatch(this.controller.matchId):undefined;
     if(this.controller?.running&&live?.status==='playing'&&live.precision?.phase==='playing'&&!live.precision.results[this.session?.playerId||'']){this.controller.sync(r,live);return;}
     if(this.controller){this.controller.destroy();this.controller=undefined;}
@@ -148,21 +159,36 @@ class PrecisionController{
   async runLightsOut(){
     const stage=this.stage();if(!stage)return;const scores:number[]=[];stage.innerHTML=`<div class="lights-game"><div class="trial-label">START <span id="trial-no">1</span> / 5</div><div class="f1-lights">${Array.from({length:5},(_,i)=>`<div class="light-stack"><span class="red-light" data-light="${i}"></span><span class="red-light dim"></span></div>`).join('')}</div><div id="reaction-message" class="reaction-message">WAIT FOR LIGHTS OUT</div><button id="reaction-pad" class="reaction-pad">WAIT…<small>Tap here the instant the lights go out</small></button><div id="reaction-history" class="reaction-history"></div></div>`;
     const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
-    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:number)=>void=()=>{};
-    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='waiting'){phase='locked';resolveTap(1000);sound.beep(180,.14)}else if(phase==='go'){phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap(rt);sound.beep(820,.06)}});
+    type TapResult={score:number;falseStart:boolean};
+    const falseStartFlags:boolean[]=[];
+    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{
+      e.preventDefault();
+      if(phase==='waiting'){
+        // A tap before lights-out is the ONLY false-start condition. Keep the
+        // agreed 1.000 s score for that attempt, but track the false-start flag
+        // separately so a legitimate slow reaction (> 1.000 s) is never mislabeled.
+        phase='locked';resolveTap({score:1000,falseStart:true});sound.beep(180,.14);
+      }else if(phase==='go'){
+        phase='locked';
+        const rt=Math.max(0,performance.now()-lightOutAt);
+        resolveTap({score:rt,falseStart:false});sound.beep(820,.06);
+      }
+    });
     await sleep(800);
     for(let trial=0;trial<5&&!this.destroyed;trial++){
       trialEl.textContent=String(trial+1);document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go','false');pad.innerHTML='WAIT…<small>Do not anticipate</small>';msg.textContent='LIGHTS BUILDING';phase='waiting';
       for(let i=0;i<5;i++){await sleep(300);if(this.destroyed)return;document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);}
       const delay=650+seededUnit(this.state.seed,trial)*1800;
-      const resultPromise=new Promise<number>(r=>resolveTap=r);
+      const resultPromise=new Promise<TapResult>(r=>resolveTap=r);
       const outPromise=(async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
       void outPromise;
-      const reaction=await resultPromise;if(this.destroyed)return;scores.push(Math.round(reaction));
-      if(reaction>=1000){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
-      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${v>=1000?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,reaction>=1000?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
+      const tap=await resultPromise;if(this.destroyed)return;
+      const reaction=Math.round(tap.score);scores.push(reaction);falseStartFlags.push(tap.falseStart);
+      if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
+      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
     }
-    if(this.destroyed)return;const med=median(scores),falseStarts=scores.filter(v=>v>=1000).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
+    if(this.destroyed)return;const med=median(scores),falseStarts=falseStartFlags.filter(Boolean).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const stage=this.stage();if(!stage)return;

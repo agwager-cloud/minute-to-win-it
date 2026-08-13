@@ -71,13 +71,19 @@ export class NetworkClient {
     }});
     socket.addEventListener('close',()=>{if(this.ws!==socket)return;this.connected=false;this.stopHeartbeat();if(!this.stopped){this.events.onStatus('offline','Connection lost. Reconnecting automatically — active matches allow a 20 second resume window.');this.scheduleReconnect();}});
   }
-  private startHeartbeat(){this.stopHeartbeat();this.heartbeatTimer=window.setInterval(()=>{if(this.stopped)return;const s=this.ws;if(!s||s.readyState!==WebSocket.OPEN)return;if(Date.now()-this.lastServerMessageAt>15000){this.restart('Server response paused. Restoring your room…');return;}try{s.send(JSON.stringify({type:'ping',sentAt:Date.now()}))}catch{this.restart('Rechecking the game connection…')}},5000)}
+  private startHeartbeat(){this.stopHeartbeat();this.heartbeatTimer=window.setInterval(()=>{if(this.stopped)return;const s=this.ws;if(!s||s.readyState!==WebSocket.OPEN)return;if(Date.now()-this.lastServerMessageAt>30000){this.restart('Server response paused. Restoring your room…');return;}try{s.send(JSON.stringify({type:'ping',sentAt:Date.now()}))}catch{this.restart('Rechecking the game connection…')}},5000)}
   private stopHeartbeat(){if(this.heartbeatTimer)clearInterval(this.heartbeatTimer);this.heartbeatTimer=undefined;}
   private restart(detail:string){if(this.stopped)return;this.connected=false;this.stopHeartbeat();this.events.onStatus('offline',detail);try{this.ws?.close(4001,'Heartbeat timeout')}catch{}this.scheduleReconnect();}
   private handleVisibilityChange=()=>{if(document.visibilityState==='visible')this.checkConnectionAfterWake();};
-  private checkConnectionAfterWake=()=>{if(this.stopped)return;const s=this.ws;if(s?.readyState===WebSocket.OPEN){if(this.lastServerMessageAt&&Date.now()-this.lastServerMessageAt>15000){this.restart('This device woke with a stale connection. Restoring your room…');return;}try{s.send(JSON.stringify({type:'ping',sentAt:Date.now()}))}catch{this.restart('Rechecking the game connection…')}return;}if(!this.retryTimer){this.retryDelay=150;this.scheduleReconnect();}};
+  private checkConnectionAfterWake=()=>{if(this.stopped)return;const s=this.ws;if(s?.readyState===WebSocket.OPEN){if(this.lastServerMessageAt&&Date.now()-this.lastServerMessageAt>30000){this.restart('This device woke with a stale connection. Restoring your room…');return;}try{s.send(JSON.stringify({type:'ping',sentAt:Date.now()}))}catch{this.restart('Rechecking the game connection…')}return;}if(!this.retryTimer){this.retryDelay=150;this.scheduleReconnect();}};
   private scheduleReconnect(){if(this.stopped||this.retryTimer)return;const d=this.retryDelay;this.retryDelay=Math.min(4000,Math.round(this.retryDelay*1.55));this.retryTimer=window.setTimeout(()=>{this.retryTimer=undefined;this.connect()},d);}
   isOnline(){return this.connected&&this.ws?.readyState===WebSocket.OPEN;}
+  /**
+   * Repair a split-brain presence state where this browser still has a live
+   * WebSocket but the room snapshot says this same player is disconnected.
+   * A clean close + resume rebinds the authoritative socket on the server.
+   */
+  repairRoomSession(){if(this.stopped||!this.session)return;this.retryDelay=150;this.restart('Your room presence became out of sync. Rejoining automatically…');}
   send(payload:unknown){if(!this.isOnline()){this.events.onError('Still connecting to the server. Minute to Win It will keep retrying automatically.');return;}this.ws!.send(JSON.stringify(payload));}
   hostRoom(name:string){this.send({type:'host-room',name,deviceId:this.deviceId});}
   joinRoom(name:string,roomCode:string){this.send({type:'join-room',name,roomCode,deviceId:this.deviceId});}
