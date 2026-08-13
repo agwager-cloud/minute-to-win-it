@@ -312,8 +312,11 @@ class PrecisionController{
   async runBlindBeat(){
     const stage=this.stage();if(!stage)return;
     const bpm=Math.round(92+seededUnit(this.state.seed,500)*26),interval=60000/bpm,visibleBeats=16,blindBeats=16;
-    const missPenalty=Math.round(interval*.78),extraPenalty=Math.round(interval*.72);
-    const blindErrors=Array<number|undefined>(blindBeats).fill(undefined);let extraTaps=0,blindTapCount=0,phase:'countdown'|'visible'|'blind'|'done'='countdown';
+    // v0.1.11: Blind Beat is intentionally forgiving enough for classroom play.
+    // A slightly early/late tap should count as timing drift, not immediately as
+    // a missed beat. Miss/extra penalties still discourage stopping or spamming.
+    const matchTolerance=interval*.80,missPenalty=Math.round(interval*.55),extraPenalty=Math.round(interval*.48);
+    const blindErrors=Array<number|undefined>(blindBeats).fill(undefined);let extraTaps=0,blindTapCount=0,nextBlindIndex=0,phase:'countdown'|'visible'|'blind'|'done'='countdown';
     let firstVisibleAt=0,firstBlindAt=0;
     stage.innerHTML=`<div class="beat-game">
       <div class="beat-topline"><div class="trial-label">BLIND BEAT <span id="beat-phase-label">GET READY</span></div><div class="beat-tempo">TEMPO <strong>${bpm}</strong><small>BPM</small></div></div>
@@ -338,10 +341,15 @@ class PrecisionController{
     pad.addEventListener('pointerdown',e=>{
       e.preventDefault();if(phase==='countdown'||phase==='done')return;flashTap();sound.beep(phase==='visible'?520:430,.025);
       if(phase==='visible')return;
-      blindTapCount++;tapCount.textContent=`BLIND TAPS ${blindTapCount}`;const now=performance.now(),raw=(now-firstBlindAt)/interval,index=Math.round(raw);
-      if(index<0||index>=blindBeats){extraTaps++;return;}
-      const expected=firstBlindAt+index*interval,error=Math.abs(now-expected);
-      if(blindErrors[index]===undefined&&error<=interval*.49){blindErrors[index]=Math.round(error);}else extraTaps++;
+      blindTapCount++;tapCount.textContent=`BLIND TAPS ${blindTapCount}`;const now=performance.now();
+      // Match beats in sequence with a wide tolerance. This is intentionally more
+      // forgiving than nearest-beat matching: a player can run consistently late
+      // without having every later tap shifted onto the following beat. If they
+      // genuinely skip a beat, we advance past that missed beat and recover.
+      while(nextBlindIndex<blindBeats&&now-(firstBlindAt+nextBlindIndex*interval)>matchTolerance)nextBlindIndex++;
+      if(nextBlindIndex>=blindBeats){extraTaps++;return;}
+      const expected=firstBlindAt+nextBlindIndex*interval,error=now-expected;
+      if(Math.abs(error)<=matchTolerance){blindErrors[nextBlindIndex]=Math.round(Math.abs(error));nextBlindIndex++;}else extraTaps++;
     });
     for(const n of [3,2,1]){if(this.destroyed)return;phaseLabel.textContent='GET READY';msg.textContent=`STARTING IN ${n}`;pad.innerHTML=`${n}<small>Then tap with every pulse</small>`;sound.beep(360+n*90,.045);await sleep(700)}
     if(this.destroyed)return;
