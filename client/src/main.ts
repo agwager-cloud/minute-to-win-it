@@ -512,21 +512,21 @@ class PrecisionController{
   }
   async runDriftLine(){
     const stage=this.stage();if(!stage)return;
-    const durationMs=20000,segments=10,segmentMs=durationMs/segments,bandHalf=.22;
-    const segmentInside=Array.from({length:segments},()=>0),segmentTotal=Array.from({length:segments},()=>0);let deviationWeighted=0,totalSampleMs=0;
+    const durationMs=20000,segments=10,segmentMs=durationMs/segments,perfectHalf=.105,nearHalf=.46;
+    const segmentQuality=Array.from({length:segments},()=>0),segmentTotal=Array.from({length:segments},()=>0);let deviationWeighted=0,totalSampleMs=0;
     stage.innerHTML=`<div class="drift-game">
       <div class="drift-topline"><div class="trial-label">SECTOR <span id="drift-sector">1</span> / ${segments}</div><div class="drift-score">SCORE <strong id="drift-score">0</strong><small>/ 1000</small></div></div>
       <div class="drift-arena" id="drift-arena">
         <div class="drift-speed-lines"></div>
-        <div class="drift-road"><span class="drift-edge left"></span><span class="drift-edge right"></span><div class="drift-centre-line"></div></div>
-        <div class="drift-gauge-label left">LEFT DRIFT</div><div class="drift-gauge-label right">RIGHT DRIFT</div>
-        <div class="drift-band" id="drift-band"><span>PERFECT LINE</span></div>
-        <div class="drift-car" id="drift-car"><span>🏎️</span><i></i></div>
+        <div class="drift-road"><span class="drift-edge top"></span><span class="drift-edge bottom"></span><div class="drift-centre-line"></div></div>
+        <div class="drift-gauge-label top">STEER LEFT</div><div class="drift-gauge-label bottom">STEER RIGHT</div>
+        <div class="drift-band" id="drift-band"><span>PERFECT DRIFT LINE</span></div>
+        <div class="drift-car" id="drift-car"><span>🏎️</span><i class="drift-trail one"></i><i class="drift-trail two"></i></div>
         <div class="drift-zero"></div>
       </div>
       <div class="drift-controls">
-        <div class="drift-status-card"><small>CONTROL</small><strong id="drift-status">GET READY</strong><em id="drift-stat">Keep the car inside green</em></div>
-        <div class="drift-buttons"><button id="drift-left" class="drift-button left">◀ LEFT<small>Hold to correct</small></button><button id="drift-right" class="drift-button right">RIGHT ▶<small>Hold to correct</small></button></div>
+        <div class="drift-status-card"><small>DRIFT CONTROL</small><strong id="drift-status">GET READY</strong><em id="drift-stat">Counter-steer and ride the green line</em></div>
+        <div class="drift-buttons"><button id="drift-left" class="drift-button left">◀ LEFT<small>Hold to counter-steer</small></button><button id="drift-right" class="drift-button right">RIGHT ▶<small>Hold to counter-steer</small></button></div>
         <div class="drift-progress"><div id="drift-progress-fill"></div><span id="drift-time">20.0 s</span></div>
         <div id="drift-history" class="drift-history"></div>
       </div>
@@ -536,33 +536,39 @@ class PrecisionController{
     const setButton=(button:HTMLButtonElement,side:'left'|'right',down:boolean)=>{if(side==='left')leftDown=down;else rightDown=down;button.classList.toggle('held',down);};
     const bindHold=(button:HTMLButtonElement,side:'left'|'right')=>{button.addEventListener('pointerdown',e=>{e.preventDefault();if(!running)return;try{button.setPointerCapture(e.pointerId)}catch{}setButton(button,side,true);sound.beep(side==='left'?430:520,.025)});const release=(e:PointerEvent)=>{e.preventDefault();setButton(button,side,false)};button.addEventListener('pointerup',release);button.addEventListener('pointercancel',release);button.addEventListener('lostpointercapture',()=>setButton(button,side,false));};
     bindHold(left,'left');bindHold(right,'right');
-    const phase1=seededUnit(this.state.seed,1100)*Math.PI*2,phase2=seededUnit(this.state.seed,1101)*Math.PI*2,phase3=seededUnit(this.state.seed,1102)*Math.PI*2;
-    const freq1=.54+seededUnit(this.state.seed,1110)*.16,freq2=.22+seededUnit(this.state.seed,1111)*.10;
-    const targetAt=(t:number)=>Math.max(-.54,Math.min(.54,.34*Math.sin(t*freq1+phase1)+.16*Math.sin(t*freq2+phase2)));
-    const windAt=(t:number)=>.23*Math.sin(t*1.13+phase3)+.10*Math.sin(t*.47+phase1*.7);
-    const initialTarget=targetAt(0);band.style.left=`${50+initialTarget*42}%`;band.style.width=`${bandHalf*84}%`;car.style.left=`${50+initialTarget*42}%`;
-    for(const n of [3,2,1]){status.textContent=String(n);stat.textContent='Drift run starts automatically';sound.beep(360+n*80,.05);await sleep(700);if(this.destroyed)return;}
-    status.textContent='GO!';stat.textContent='Use tiny LEFT / RIGHT corrections';sound.beep(850,.07);await sleep(180);if(this.destroyed)return;
+    const phase1=seededUnit(this.state.seed,1100)*Math.PI*2,phase2=seededUnit(this.state.seed,1101)*Math.PI*2,phase3=seededUnit(this.state.seed,1102)*Math.PI*2,phase4=seededUnit(this.state.seed,1103)*Math.PI*2;
+    const freq1=.48+seededUnit(this.state.seed,1110)*.14,freq2=.20+seededUnit(this.state.seed,1111)*.08;
+    const targetAt=(t:number)=>Math.max(-.58,Math.min(.58,.31*Math.sin(t*freq1+phase1)+.13*Math.sin(t*freq2+phase2)+.05*Math.sin(t*.93+phase4)));
+    const windAt=(t:number)=>.29*Math.sin(t*1.08+phase3)+.14*Math.sin(t*.43+phase1*.7);
+    const qualityFor=(dist:number)=>dist<=perfectHalf?1:Math.max(0,1-(dist-perfectHalf)/(nearHalf-perfectHalf))*.68;
+    const initialTarget=targetAt(0);band.style.top=`${50+initialTarget*36}%`;band.style.height=`${perfectHalf*72}%`;car.style.top=`${50+initialTarget*36}%`;
+    for(const n of [3,2,1]){status.textContent=String(n);stat.textContent='20 second drift run starts automatically';sound.beep(360+n*80,.05);await sleep(700);if(this.destroyed)return;}
+    status.textContent='GO!';stat.textContent='Hold briefly — momentum keeps sliding after release';sound.beep(850,.07);await sleep(180);if(this.destroyed)return;
     running=true;started=performance.now();lastNow=started;position=targetAt(0);velocity=0;
     await new Promise<void>(resolve=>{
       const tick=(now:number)=>{if(this.destroyed){resolve();return;}const elapsed=Math.min(durationMs,now-started),t=elapsed/1000,dt=Math.min(.05,Math.max(.001,(now-lastNow)/1000));lastNow=now;
         const control=(rightDown?1:0)-(leftDown?1:0),target=targetAt(t),wind=windAt(t);
-        velocity+=(control*1.72+wind-velocity*2.15)*dt;position+=velocity*dt;
-        if(position>1){position=1;velocity=Math.min(0,velocity)*.35}else if(position<-1){position=-1;velocity=Math.max(0,velocity)*.35}
-        const dist=Math.abs(position-target),inside=dist<=bandHalf,sector=Math.min(segments-1,Math.floor(elapsed/segmentMs));
-        const sampleMs=dt*1000;segmentTotal[sector]+=sampleMs;if(inside)segmentInside[sector]+=sampleMs;deviationWeighted+=dist*sampleMs;totalSampleMs+=sampleMs;
-        const targetPct=50+target*42,carPct=50+position*42,bandWidthPct=bandHalf*84;
-        band.style.left=`${targetPct}%`;band.style.width=`${bandWidthPct}%`;car.style.left=`${carPct}%`;car.style.transform=`translate(-50%,-50%) rotate(${Math.max(-22,Math.min(22,velocity*22))}deg)`;
-        arena.classList.toggle('on-line',inside);arena.classList.toggle('off-line',!inside);status.textContent=inside?'ON THE LINE':position<target?'CORRECT RIGHT':'CORRECT LEFT';status.className=inside?'good':'warn';
-        const insideTotal=segmentInside.reduce((a,b)=>a+b,0),pct=elapsed>0?insideTotal/elapsed*100:100;stat.textContent=`${pct.toFixed(0)}% of run inside green`;progress.style.width=`${Math.max(0,100-elapsed/durationMs*100)}%`;timeEl.textContent=`${Math.max(0,(durationMs-elapsed)/1000).toFixed(1)} s`;
+        // Deliberately low damping: steering changes lateral momentum rather than
+        // snapping the car directly toward the button direction. Players must
+        // counter-steer and release early, which makes the car feel like a drift.
+        velocity+=(control*1.78+wind*.72-velocity*.58)*dt;position+=velocity*dt;
+        if(position>.92){position=.92;velocity=Math.min(0,velocity)*.28}else if(position<-.92){position=-.92;velocity=Math.max(0,velocity)*.28}
+        const dist=Math.abs(position-target),inside=dist<=perfectHalf,quality=qualityFor(dist),sector=Math.min(segments-1,Math.floor(elapsed/segmentMs));
+        const sampleMs=dt*1000;segmentTotal[sector]+=sampleMs;segmentQuality[sector]+=quality*sampleMs;deviationWeighted+=dist*sampleMs;totalSampleMs+=sampleMs;
+        const targetPct=50+target*36,carPct=50+position*36,bandHeightPct=perfectHalf*72;
+        band.style.top=`${targetPct}%`;band.style.height=`${bandHeightPct}%`;car.style.top=`${carPct}%`;
+        const yaw=Math.max(-17,Math.min(17,-velocity*18+control*5));car.style.transform=`translate(-50%,-50%) rotate(${yaw}deg)`;
+        arena.classList.toggle('on-line',inside);arena.classList.toggle('off-line',!inside);arena.classList.toggle('near-line',!inside&&quality>.22);
+        if(inside){status.textContent='PERFECT DRIFT';status.className='good'}else if(quality>.42){status.textContent=position<target?'COUNTER-STEER RIGHT':'COUNTER-STEER LEFT';status.className='okay'}else{status.textContent=position<target?'SLIDING LEFT':'SLIDING RIGHT';status.className='warn'}
+        const elapsedQuality=segmentQuality.reduce((a,b)=>a+b,0),qualityPct=elapsed>0?elapsedQuality/elapsed*100:100;stat.textContent=inside?'Locked onto the perfect line':`${qualityPct.toFixed(0)}% drift quality · momentum ${Math.abs(velocity)<.16?'settled':'sliding'}`;progress.style.width=`${Math.max(0,100-elapsed/durationMs*100)}%`;timeEl.textContent=`${Math.max(0,(durationMs-elapsed)/1000).toFixed(1)} s`;
         if(sector!==lastSector){lastSector=sector;sectorEl.textContent=String(sector+1)}
-        const completed=Math.min(segments,Math.floor(elapsed/segmentMs));const scores=Array.from({length:completed},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentInside[i]/Math.max(1,segmentTotal[i]))))));const liveScore=scores.reduce((a,b)=>a+b,0);scoreEl.textContent=String(liveScore);history.innerHTML=scores.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');if(completed>lastProgressSent){lastProgressSent=completed;this.sendProgress(completed,`SECTOR ${completed} · ${scores[completed-1]} PTS`,liveScore);}
+        const completed=Math.min(segments,Math.floor(elapsed/segmentMs));const scores=Array.from({length:completed},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentQuality[i]/Math.max(1,segmentTotal[i]))))));const liveScore=scores.reduce((a,b)=>a+b,0);scoreEl.textContent=String(liveScore);history.innerHTML=scores.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');if(completed>lastProgressSent){lastProgressSent=completed;this.sendProgress(completed,`SECTOR ${completed} · ${scores[completed-1]} PTS`,liveScore);}
         if(elapsed>=durationMs){running=false;leftDown=false;rightDown=false;left.classList.remove('held');right.classList.remove('held');resolve();return;}this.raf=requestAnimationFrame(tick);
       };this.raf=requestAnimationFrame(tick);
     });
     if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
-    const rounds=Array.from({length:segments},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentInside[i]/Math.max(1,segmentTotal[i]))))));const score=rounds.reduce((a,b)=>a+b,0),insidePct=score/10,avgDev=totalSampleMs?deviationWeighted/totalSampleMs:2,secondary=Math.round(avgDev*10000);
-    scoreEl.textContent=String(score);history.innerHTML=rounds.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');status.textContent=score>=850?'DRIFT MASTER!':score>=700?'GREAT CONTROL!':score>=520?'SOLID RUN':'RUN COMPLETE';status.className=score>=700?'good':'warn';stat.textContent=`${insidePct.toFixed(1)}% in the perfect line`;progress.style.width='0%';timeEl.textContent='FINISH';sound.beep(score>=850?980:score>=650?720:430,.1);this.sendProgress(10,'RUN COMPLETE',score);await sleep(850);if(this.destroyed)return;this.sendResult(score,secondary,`${score} / 1000 pts · ${insidePct.toFixed(1)}% in line`,rounds);
+    const rounds=Array.from({length:segments},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentQuality[i]/Math.max(1,segmentTotal[i]))))));const score=rounds.reduce((a,b)=>a+b,0),qualityPct=score/10,avgDev=totalSampleMs?deviationWeighted/totalSampleMs:2,secondary=Math.round(avgDev*10000);
+    scoreEl.textContent=String(score);history.innerHTML=rounds.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');status.textContent=score>=850?'DRIFT MASTER!':score>=700?'GREAT RUN!':score>=520?'SOLID DRIFT':'RUN COMPLETE';status.className=score>=700?'good':'warn';stat.textContent=`${qualityPct.toFixed(1)}% overall drift quality`;progress.style.width='0%';timeEl.textContent='FINISH';sound.beep(score>=850?980:score>=650?720:430,.1);this.sendProgress(10,'RUN COMPLETE',score);await sleep(850);if(this.destroyed)return;this.sendResult(score,secondary,`${score} / 1000 pts · ${qualityPct.toFixed(1)}% drift quality`,rounds);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
