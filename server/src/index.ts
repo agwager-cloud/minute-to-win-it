@@ -3245,7 +3245,7 @@ function revealCraypotsWeather(room: Room, court: Court, match: Match) {
     if (!current) return;
     if (current.day >= 10) finishCraypotsDayTen(room, live.court, live.match);
     else startCraypotsShopping(room, live.court, live.match);
-  }, 2850);
+  }, 5000);
 }
 
 function startCraypotsPlacement(room: Room, court: Court, match: Match) {
@@ -3517,7 +3517,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
 
   state.phase = 'results';
   state.winnerId = winnerId;
-  state.resultRevealAt = Date.now() + 2800;
+  state.resultRevealAt = Date.now() + 5000;
   match.winnerId = winnerId;
   broadcastRoom(room);
 
@@ -3526,7 +3526,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
     const live = findLiveMatch(room, expectedMatchId);
     if (!live || live.match.precision?.winnerId !== winnerId) return;
     try { resolveMatch(room, expectedMatchId, winnerId); } catch { /* already resolved */ }
-  }, 2850);
+  }, 5000);
 }
 
 function submitPrecisionResult(room: Room, court: Court, match: Match, playerId: string, raw: any) {
