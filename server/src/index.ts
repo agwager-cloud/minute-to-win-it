@@ -3484,7 +3484,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'drift-line';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3511,7 +3511,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   if (!ra || !rb) return;
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'drift-line';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3568,6 +3568,12 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     if (rounds.length !== 5 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Charge Shot round scores.');
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Charge Shot total does not match round scores.');
+  }
+  if (state.gameId === 'drift-line') {
+    if (score > 1000 || secondary > 20000) throw new Error('Invalid Drift Line score.');
+    if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Drift Line sector scores.');
+    const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
+    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Drift Line total does not match sector scores.');
   }
   state.results[playerId] = {
     score,
@@ -3689,6 +3695,29 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 45000);
   }
 
+  // Drift Line is a fixed 20-second continuous-control run. A suspended
+  // browser cannot be allowed to keep its court waiting after the run should
+  // have finished, so force a safe zero result if no submission arrives.
+  if (room.selectedGameId === 'drift-line') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'drift-line') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 0,
+            secondary: 20000,
+            display: '0 / 1000 pts · server timeout',
+            rounds: Array.from({ length: 10 }, () => 0),
+          });
+        } catch { /* match may have resolved while the watchdog was running */ }
+      }
+    }, 36000);
+  }
+
   // Parry is also completely self-advancing, but a suspended browser can
   // throttle JavaScript timers. Force any missing result after 42 seconds so
   // no student can hold a court by backgrounding the tab or refusing input.
@@ -3714,7 +3743,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'drift-line' ? 22500 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3768,6 +3797,16 @@ function startPrecision(room: Room, court: Court, match: Match) {
           score,
           secondary,
           display: `${score} / 500 pts · ${(totalError / 5).toFixed(1)} avg miss`,
+          rounds,
+        });
+      } else if (room.selectedGameId === 'drift-line') {
+        const rounds = Array.from({ length: 10 }, () => Math.random() < 0.12 ? Math.round(50 + Math.random() * 20) : Math.round(72 + Math.random() * 27));
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const secondary = Math.round(rounds.reduce((total, value) => total + (100 - value), 0) * 12);
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary,
+          display: `${score} / 1000 pts · ${(score / 10).toFixed(1)}% in line`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
