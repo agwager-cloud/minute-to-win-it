@@ -3571,6 +3571,34 @@ function startPrecision(room: Room, court: Court, match: Match) {
   };
   broadcastRoom(room);
 
+  // Time Stop must never be able to hold a court indefinitely. The client
+  // auto-times each target at 20 seconds; this server watchdog is a second
+  // line of defence for suspended/throttled tabs or a client that stops
+  // advancing while its WebSocket remains connected.
+  if (room.selectedGameId === 'time-stop') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'time-stop') return;
+      const targets = state.targets?.length === 3 ? state.targets : [7.43, 9.18, 12.05];
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        const rounds = targets.map((target) => Math.round(Math.abs(20 - target) * 1000));
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const secondary = Math.max(...rounds);
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score,
+            secondary,
+            display: `${(score / 1000).toFixed(2)} s total error · server timeout`,
+            rounds,
+          });
+        } catch { /* match may have resolved while the watchdog was running */ }
+      }
+    }, 80000);
+  }
+
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
     const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : 4800;
