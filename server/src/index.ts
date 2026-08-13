@@ -3484,7 +3484,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3511,7 +3511,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   if (!ra || !rb) return;
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3556,6 +3556,12 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
   if (state.gameId === 'blind-beat') {
     if (score > 2000 || secondary > 750) throw new Error('Invalid Blind Beat score.');
     if (rounds.length !== 16 || rounds.some((value: number) => value > 750)) throw new Error('Invalid Blind Beat timing data.');
+  }
+  if (state.gameId === 'overpour') {
+    if (score > 500 || secondary > 50000) throw new Error('Invalid Overpour score.');
+    if (rounds.length !== 5 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Overpour pour scores.');
+    const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
+    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Overpour total does not match pour scores.');
   }
   state.results[playerId] = {
     score,
@@ -3632,6 +3638,29 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 32000);
   }
 
+  // Overpour advances every round even if a player never presses the pour
+  // control. This server watchdog covers a suspended/throttled tab so a phone
+  // cannot leave the court waiting indefinitely.
+  if (room.selectedGameId === 'overpour') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'overpour') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 0,
+            secondary: 50000,
+            display: '0 / 500 pts · server timeout',
+            rounds: [0, 0, 0, 0, 0],
+          });
+        } catch { /* match may have resolved while the watchdog was running */ }
+      }
+    }, 45000);
+  }
+
   // Parry is also completely self-advancing, but a suspended browser can
   // throttle JavaScript timers. Force any missing result after 42 seconds so
   // no student can hold a court by backgrounding the tab or refusing input.
@@ -3657,7 +3686,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3689,6 +3718,17 @@ function startPrecision(room: Room, court: Court, match: Match) {
           score,
           secondary,
           display: `${score} / 1000 pts · ${mistakes} mistake${mistakes === 1 ? '' : 's'}`,
+          rounds,
+        });
+      } else if (room.selectedGameId === 'overpour') {
+        const rounds = Array.from({ length: 5 }, () => Math.random() < 0.10 ? Math.round(35 + Math.random() * 30) : Math.round(72 + Math.random() * 29));
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const totalErrorPct = rounds.reduce((total, value) => total + Math.max(0, (100 - value) / 4), 0);
+        const secondary = Math.round(totalErrorPct * 100);
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary,
+          display: `${score} / 500 pts · ${(totalErrorPct / 5).toFixed(1)}% avg error`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
