@@ -3916,11 +3916,33 @@ function resetToLobby(room: Room) {
 const wss = new WebSocketServer({ port: PORT });
 console.log(`[Minute to Win It] WebSocket server listening on ws://localhost:${PORT}`);
 
+// Transport-level heartbeat copied from the proven Dodeca-Gems reconnect
+// pattern. It detects half-open mobile/tablet sockets after Wi-Fi changes or
+// browser backgrounding. Browsers answer WebSocket ping frames automatically.
+const socketAlive = new WeakMap<WebSocket, boolean>();
+const transportHeartbeat = setInterval(() => {
+  for (const client of (wss as any).clients as Set<WebSocket>) {
+    if (socketAlive.get(client) === false) {
+      (client as any).terminate();
+      continue;
+    }
+    socketAlive.set(client, false);
+    try { (client as any).ping(); } catch { (client as any).terminate(); }
+  }
+}, 7000);
+transportHeartbeat.unref?.();
+(wss as any).on('close', () => clearInterval(transportHeartbeat));
+
 wss.on('connection', (ws) => {
   contexts.set(ws, {});
+  socketAlive.set(ws, true);
+  (ws as any).on('pong', () => socketAlive.set(ws, true));
   send(ws, { type: 'connected', serverTime: Date.now() });
 
   ws.on('message', (raw) => {
+    // Any traffic proves this socket is alive even if a proxy/browser delays a
+    // control-frame pong. This is useful on iPadOS and congested school Wi-Fi.
+    socketAlive.set(ws, true);
     let msg: ClientMessage;
     try {
       msg = JSON.parse(raw.toString()) as ClientMessage;
@@ -4239,7 +4261,15 @@ wss.on('connection', (ws) => {
     const ctx = contexts.get(ws);
     if (ctx?.deviceId && activeDevices.get(ctx.deviceId) === ws) activeDevices.delete(ctx.deviceId);
     if (!ctx?.roomCode || !ctx.playerId) return;
-    if (socketsByPlayer.get(ctx.playerId) === ws) socketsByPlayer.delete(ctx.playerId);
+
+    // A reconnect replaces the old socket. The old socket's close event can
+    // arrive AFTER attachPlayer() has already installed the replacement. Only
+    // the currently-authoritative socket may mark the player offline. Without
+    // this guard, a genuinely reconnected phone/iPad can randomly appear
+    // disconnected and start the 20-second forfeit countdown.
+    if (socketsByPlayer.get(ctx.playerId) !== ws) return;
+
+    socketsByPlayer.delete(ctx.playerId);
     const room = rooms.get(ctx.roomCode);
     const player = room?.players.get(ctx.playerId);
     if (room && player) {
