@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='drift-line')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -100,7 +100,7 @@ class MinuteApp{
   bindCommon(){document.querySelector('#sound-toggle')?.addEventListener('click',()=>{sound.toggle();sound.beep();this.render();});}
   updateConnectionBadge(){const el=document.querySelector('#connection-badge');if(el){el.className=`connection ${this.status}`;el.textContent=this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING';}}
   renderStart(){
-    appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>14 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
+    appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>13 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
     this.bindCommon();const name=document.querySelector<HTMLInputElement>('#name')!,code=document.querySelector<HTMLInputElement>('#code')!;code.addEventListener('input',()=>code.value=code.value.replace(/\D/g,'').slice(0,5));
     document.querySelector('#host')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.hostRoom(name.value.trim())});
     document.querySelector('#join')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.joinRoom(name.value.trim(),code.value.trim())});
@@ -156,7 +156,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='drift-line')void this.runDriftLine();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -510,65 +510,58 @@ class PrecisionController{
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)} avg miss`,points);
   }
-  async runDriftLine(){
+  async runStack(){
     const stage=this.stage();if(!stage)return;
-    const durationMs=20000,segments=10,segmentMs=durationMs/segments,perfectHalf=.105,nearHalf=.46;
-    const segmentQuality=Array.from({length:segments},()=>0),segmentTotal=Array.from({length:segments},()=>0);let deviationWeighted=0,totalSampleMs=0;
-    stage.innerHTML=`<div class="drift-game">
-      <div class="drift-topline"><div class="trial-label">SECTOR <span id="drift-sector">1</span> / ${segments}</div><div class="drift-score">SCORE <strong id="drift-score">0</strong><small>/ 1000</small></div></div>
-      <div class="drift-arena" id="drift-arena">
-        <div class="drift-speed-lines"></div>
-        <div class="drift-road"><span class="drift-edge top"></span><span class="drift-edge bottom"></span><div class="drift-centre-line"></div></div>
-        <div class="drift-gauge-label top">STEER LEFT</div><div class="drift-gauge-label bottom">STEER RIGHT</div>
-        <div class="drift-band" id="drift-band"><span>PERFECT DRIFT LINE</span></div>
-        <div class="drift-car" id="drift-car"><span>🏎️</span><i class="drift-trail one"></i><i class="drift-trail two"></i></div>
-        <div class="drift-zero"></div>
+    const drops=8,maxScore=800,points:number[]=[],overhangs:number[]=[];
+    stage.innerHTML=`<div class="stack-game">
+      <div class="stack-topline"><div class="trial-label">DROP <span id="stack-round">1</span> / ${drops}</div><div class="stack-score">SCORE <strong id="stack-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="stack-arena" id="stack-arena">
+        <div class="stack-sky"></div><div class="stack-grid"></div>
+        <div class="stack-tower" id="stack-tower"><div class="stack-base"><span>BASE</span></div></div>
+        <div class="stack-moving" id="stack-moving"><span></span></div>
+        <div class="stack-slice" id="stack-slice"></div>
+        <div class="stack-ground"></div>
       </div>
-      <div class="drift-controls">
-        <div class="drift-status-card"><small>DRIFT CONTROL</small><strong id="drift-status">GET READY</strong><em id="drift-stat">Counter-steer and ride the green line</em></div>
-        <div class="drift-buttons"><button id="drift-left" class="drift-button left">◀ LEFT<small>Hold to counter-steer</small></button><button id="drift-right" class="drift-button right">RIGHT ▶<small>Hold to counter-steer</small></button></div>
-        <div class="drift-progress"><div id="drift-progress-fill"></div><span id="drift-time">20.0 s</span></div>
-        <div id="drift-history" class="drift-history"></div>
+      <div class="stack-controls">
+        <div class="stack-status-card"><small>ALIGNMENT</small><strong id="stack-status">GET READY</strong><em id="stack-detail">Keep as much of every block as possible</em></div>
+        <button id="stack-pad" class="stack-pad">DROP BLOCK<small>Tap when the moving block is centred over the tower</small></button>
+        <div class="stack-time"><div id="stack-time-fill"></div><span id="stack-time-label">6.0 s</span></div>
+        <div id="stack-history" class="stack-history"></div>
       </div>
     </div>`;
-    const sectorEl=document.querySelector<HTMLElement>('#drift-sector')!,scoreEl=document.querySelector<HTMLElement>('#drift-score')!,arena=document.querySelector<HTMLElement>('#drift-arena')!,band=document.querySelector<HTMLElement>('#drift-band')!,car=document.querySelector<HTMLElement>('#drift-car')!,status=document.querySelector<HTMLElement>('#drift-status')!,stat=document.querySelector<HTMLElement>('#drift-stat')!,left=document.querySelector<HTMLButtonElement>('#drift-left')!,right=document.querySelector<HTMLButtonElement>('#drift-right')!,progress=document.querySelector<HTMLElement>('#drift-progress-fill')!,timeEl=document.querySelector<HTMLElement>('#drift-time')!,history=document.querySelector<HTMLElement>('#drift-history')!;
-    let leftDown=false,rightDown=false,running=false,position=0,velocity=0,lastNow=0,started=0,lastSector=-1,lastProgressSent=0;
-    const setButton=(button:HTMLButtonElement,side:'left'|'right',down:boolean)=>{if(side==='left')leftDown=down;else rightDown=down;button.classList.toggle('held',down);};
-    const bindHold=(button:HTMLButtonElement,side:'left'|'right')=>{button.addEventListener('pointerdown',e=>{e.preventDefault();if(!running)return;try{button.setPointerCapture(e.pointerId)}catch{}setButton(button,side,true);sound.beep(side==='left'?430:520,.025)});const release=(e:PointerEvent)=>{e.preventDefault();setButton(button,side,false)};button.addEventListener('pointerup',release);button.addEventListener('pointercancel',release);button.addEventListener('lostpointercapture',()=>setButton(button,side,false));};
-    bindHold(left,'left');bindHold(right,'right');
-    const phase1=seededUnit(this.state.seed,1100)*Math.PI*2,phase2=seededUnit(this.state.seed,1101)*Math.PI*2,phase3=seededUnit(this.state.seed,1102)*Math.PI*2,phase4=seededUnit(this.state.seed,1103)*Math.PI*2;
-    const freq1=.48+seededUnit(this.state.seed,1110)*.14,freq2=.20+seededUnit(this.state.seed,1111)*.08;
-    const targetAt=(t:number)=>Math.max(-.58,Math.min(.58,.31*Math.sin(t*freq1+phase1)+.13*Math.sin(t*freq2+phase2)+.05*Math.sin(t*.93+phase4)));
-    const windAt=(t:number)=>.29*Math.sin(t*1.08+phase3)+.14*Math.sin(t*.43+phase1*.7);
-    const qualityFor=(dist:number)=>dist<=perfectHalf?1:Math.max(0,1-(dist-perfectHalf)/(nearHalf-perfectHalf))*.68;
-    const initialTarget=targetAt(0);band.style.top=`${50+initialTarget*36}%`;band.style.height=`${perfectHalf*72}%`;car.style.top=`${50+initialTarget*36}%`;
-    for(const n of [3,2,1]){status.textContent=String(n);stat.textContent='20 second drift run starts automatically';sound.beep(360+n*80,.05);await sleep(700);if(this.destroyed)return;}
-    status.textContent='GO!';stat.textContent='Hold briefly — momentum keeps sliding after release';sound.beep(850,.07);await sleep(180);if(this.destroyed)return;
-    running=true;started=performance.now();lastNow=started;position=targetAt(0);velocity=0;
-    await new Promise<void>(resolve=>{
-      const tick=(now:number)=>{if(this.destroyed){resolve();return;}const elapsed=Math.min(durationMs,now-started),t=elapsed/1000,dt=Math.min(.05,Math.max(.001,(now-lastNow)/1000));lastNow=now;
-        const control=(rightDown?1:0)-(leftDown?1:0),target=targetAt(t),wind=windAt(t);
-        // Deliberately low damping: steering changes lateral momentum rather than
-        // snapping the car directly toward the button direction. Players must
-        // counter-steer and release early, which makes the car feel like a drift.
-        velocity+=(control*1.78+wind*.72-velocity*.58)*dt;position+=velocity*dt;
-        if(position>.92){position=.92;velocity=Math.min(0,velocity)*.28}else if(position<-.92){position=-.92;velocity=Math.max(0,velocity)*.28}
-        const dist=Math.abs(position-target),inside=dist<=perfectHalf,quality=qualityFor(dist),sector=Math.min(segments-1,Math.floor(elapsed/segmentMs));
-        const sampleMs=dt*1000;segmentTotal[sector]+=sampleMs;segmentQuality[sector]+=quality*sampleMs;deviationWeighted+=dist*sampleMs;totalSampleMs+=sampleMs;
-        const targetPct=50+target*36,carPct=50+position*36,bandHeightPct=perfectHalf*72;
-        band.style.top=`${targetPct}%`;band.style.height=`${bandHeightPct}%`;car.style.top=`${carPct}%`;
-        const yaw=Math.max(-17,Math.min(17,-velocity*18+control*5));car.style.transform=`translate(-50%,-50%) rotate(${yaw}deg)`;
-        arena.classList.toggle('on-line',inside);arena.classList.toggle('off-line',!inside);arena.classList.toggle('near-line',!inside&&quality>.22);
-        if(inside){status.textContent='PERFECT DRIFT';status.className='good'}else if(quality>.42){status.textContent=position<target?'COUNTER-STEER RIGHT':'COUNTER-STEER LEFT';status.className='okay'}else{status.textContent=position<target?'SLIDING LEFT':'SLIDING RIGHT';status.className='warn'}
-        const elapsedQuality=segmentQuality.reduce((a,b)=>a+b,0),qualityPct=elapsed>0?elapsedQuality/elapsed*100:100;stat.textContent=inside?'Locked onto the perfect line':`${qualityPct.toFixed(0)}% drift quality · momentum ${Math.abs(velocity)<.16?'settled':'sliding'}`;progress.style.width=`${Math.max(0,100-elapsed/durationMs*100)}%`;timeEl.textContent=`${Math.max(0,(durationMs-elapsed)/1000).toFixed(1)} s`;
-        if(sector!==lastSector){lastSector=sector;sectorEl.textContent=String(sector+1)}
-        const completed=Math.min(segments,Math.floor(elapsed/segmentMs));const scores=Array.from({length:completed},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentQuality[i]/Math.max(1,segmentTotal[i]))))));const liveScore=scores.reduce((a,b)=>a+b,0);scoreEl.textContent=String(liveScore);history.innerHTML=scores.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');if(completed>lastProgressSent){lastProgressSent=completed;this.sendProgress(completed,`SECTOR ${completed} · ${scores[completed-1]} PTS`,liveScore);}
-        if(elapsed>=durationMs){running=false;leftDown=false;rightDown=false;left.classList.remove('held');right.classList.remove('held');resolve();return;}this.raf=requestAnimationFrame(tick);
-      };this.raf=requestAnimationFrame(tick);
-    });
-    if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
-    const rounds=Array.from({length:segments},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentQuality[i]/Math.max(1,segmentTotal[i]))))));const score=rounds.reduce((a,b)=>a+b,0),qualityPct=score/10,avgDev=totalSampleMs?deviationWeighted/totalSampleMs:2,secondary=Math.round(avgDev*10000);
-    scoreEl.textContent=String(score);history.innerHTML=rounds.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');status.textContent=score>=850?'DRIFT MASTER!':score>=700?'GREAT RUN!':score>=520?'SOLID DRIFT':'RUN COMPLETE';status.className=score>=700?'good':'warn';stat.textContent=`${qualityPct.toFixed(1)}% overall drift quality`;progress.style.width='0%';timeEl.textContent='FINISH';sound.beep(score>=850?980:score>=650?720:430,.1);this.sendProgress(10,'RUN COMPLETE',score);await sleep(850);if(this.destroyed)return;this.sendResult(score,secondary,`${score} / 1000 pts · ${qualityPct.toFixed(1)}% drift quality`,rounds);
+    const roundEl=document.querySelector<HTMLElement>('#stack-round')!,scoreEl=document.querySelector<HTMLElement>('#stack-score')!,arena=document.querySelector<HTMLElement>('#stack-arena')!,tower=document.querySelector<HTMLElement>('#stack-tower')!,moving=document.querySelector<HTMLElement>('#stack-moving')!,slice=document.querySelector<HTMLElement>('#stack-slice')!,status=document.querySelector<HTMLElement>('#stack-status')!,detail=document.querySelector<HTMLElement>('#stack-detail')!,pad=document.querySelector<HTMLButtonElement>('#stack-pad')!,timeFill=document.querySelector<HTMLElement>('#stack-time-fill')!,timeLabel=document.querySelector<HTMLElement>('#stack-time-label')!,history=document.querySelector<HTMLElement>('#stack-history')!;
+    type DropResult={left:number;timedOut:boolean};
+    let phase:'idle'|'running'|'locked'='idle',currentWidth=62,topLeft=19,resolveDrop:(r:DropResult)=>void=()=>{},movingLeft=19;
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='running')return;phase='locked';resolveDrop({left:movingLeft,timedOut:false});sound.beep(780,.05)});
+    await sleep(650);
+    // Base width/position are percentages of the arena. Vertical spacing is
+    // compressed on short landscape phones so all eight levels stay visible.
+    const shortLandscape=window.innerWidth>window.innerHeight&&window.innerHeight<=520;const tinyLandscape=window.innerWidth>window.innerHeight&&window.innerHeight<=400;const firstBottom=tinyLandscape?58:shortLandscape?61:63;const blockStep=tinyLandscape?17:shortLandscape?19:22;
+    const base=document.querySelector<HTMLElement>('.stack-base')!;base.style.left=`${topLeft}%`;base.style.width=`${currentWidth}%`;
+    let collapsed=false;
+    for(let round=0;round<drops&&!this.destroyed;round++){
+      roundEl.textContent=String(round+1);status.className='';status.textContent='WATCH THE SWEEP';detail.textContent=round===0?'Build a clean foundation':'The remaining block is now your new platform';pad.className='stack-pad';pad.innerHTML='DROP BLOCK<small>Tap to place it on the tower</small>';slice.className='stack-slice';timeFill.style.width='100%';
+      const blockWidth=currentWidth;const travelMin=3,travelMax=97-blockWidth;const speed=25+round*3.2+seededUnit(this.state.seed,1320+round)*10;const startFromLeft=seededUnit(this.state.seed,1340+round)>.5;const startLeft=startFromLeft?travelMin:travelMax;const direction=startFromLeft?1:-1;
+      moving.style.width=`${blockWidth}%`;moving.style.left=`${startLeft}%`;moving.style.bottom=`${firstBottom+round*blockStep}px`;moving.className='stack-moving active';moving.querySelector('span')!.textContent=round===0?'FIRST BLOCK':`BLOCK ${round+1}`;movingLeft=startLeft;phase='running';const started=performance.now();
+      let timeoutId=0;const resultPromise=new Promise<DropResult>(resolve=>{resolveDrop=resolve;timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolve({left:movingLeft,timedOut:true});},6000);this.timers.push(timeoutId)});
+      const animate=(now:number)=>{if(this.destroyed||phase!=='running')return;const elapsed=(now-started)/1000;const span=Math.max(.1,travelMax-travelMin);const distance=(speed*elapsed)% (span*2);const offset=distance<=span?distance:(span*2-distance);movingLeft=startFromLeft?travelMin+offset:travelMax-offset;moving.style.left=`${movingLeft}%`;timeFill.style.width=`${Math.max(0,100-(now-started)/60)}%`;timeLabel.textContent=`${Math.max(0,6-(now-started)/1000).toFixed(1)} s`;this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
+      const dropped=await resultPromise;clearTimeout(timeoutId);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;movingLeft=dropped.left;
+      const left=Math.max(movingLeft,topLeft),right=Math.min(movingLeft+blockWidth,topLeft+currentWidth),overlap=Math.max(0,right-left),offset=Math.abs(movingLeft-topLeft);let earned=0,perfect=false;
+      if(!dropped.timedOut&&overlap>0){const snapTolerance=Math.max(.65,Math.min(1.8,currentWidth*.035));perfect=offset<=snapTolerance;earned=perfect?100:Math.max(8,Math.min(99,Math.round(100*(overlap/blockWidth))));}
+      if(dropped.timedOut||overlap<=0){earned=0;collapsed=true;}
+      points.push(earned);const overhangPct=dropped.timedOut?100:Math.max(0,100-overlap/blockWidth*100);overhangs.push(overhangPct);
+      if(collapsed){moving.className='stack-moving dropped collapse';arena.classList.add('collapsed');status.className='bad';status.textContent=dropped.timedOut?'TIME OUT — TOWER LOST':'MISSED THE TOWER!';detail.textContent='The remaining drops score 0 automatically';pad.className='stack-pad miss';pad.innerHTML='TOWER COLLAPSED<small>Run ends automatically</small>';sound.beep(170,.12);
+      }else{
+        const placedLeft=perfect?topLeft:left,placedWidth=perfect?currentWidth:overlap;moving.className=`stack-moving dropped ${perfect?'perfect':''}`;moving.style.left=`${placedLeft}%`;moving.style.width=`${placedWidth}%`;
+        if(!perfect&&overlap<blockWidth){const cutLeft=movingLeft<topLeft?movingLeft:left+overlap,cutWidth=blockWidth-overlap;slice.style.left=`${cutLeft}%`;slice.style.width=`${cutWidth}%`;slice.style.bottom=`${firstBottom+round*blockStep}px`;slice.className='stack-slice show';}
+        const placed=document.createElement('div');placed.className=`stack-placed ${perfect?'perfect':''}`;placed.style.left=`${placedLeft}%`;placed.style.width=`${placedWidth}%`;placed.style.bottom=`${firstBottom+round*blockStep}px`;placed.innerHTML=`<span>${perfect?'PERFECT':''}</span>`;tower.appendChild(placed);
+        topLeft=placedLeft;currentWidth=placedWidth;
+        status.className=earned>=96?'good':earned>=75?'okay':'warn';status.textContent=perfect?'PERFECT STACK!':earned>=85?'GREAT DROP!':earned>=65?'SOLID DROP':'BIG SLICE!';detail.textContent=perfect?'No width lost':`${overhangPct.toFixed(1)}% sliced away · ${currentWidth.toFixed(1)}% tower width remains`;pad.className=`stack-pad ${earned>=85?'success':earned>=60?'close':'miss'}`;pad.innerHTML=`${earned} POINTS<small>${perfect?'Perfect alignment':`${overhangPct.toFixed(1)}% overhang removed`}</small>`;sound.beep(perfect?980:earned>=75?720:430,.075);
+      }
+      const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);history.innerHTML=points.map((v,i)=>`<span class="${v>=90?'great':v>=60?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,collapsed?'TOWER COLLAPSED':status.textContent,total);await sleep(collapsed?1150:850);moving.className='stack-moving';slice.className='stack-slice';phase='idle';
+      if(collapsed){while(points.length<drops){points.push(0);overhangs.push(100)}break;}
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgOverhang=overhangs.reduce((a,b)=>a+b,0)/Math.max(1,overhangs.length),secondary=Math.round(avgOverhang*100);this.sendResult(total,secondary,`${total} / 800 pts · ${avgOverhang.toFixed(1)}% avg overhang`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
