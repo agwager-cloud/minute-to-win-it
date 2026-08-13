@@ -17,6 +17,11 @@ export type RoomState = {
   turnSeconds:number; serverTime:number; lateJoinQueue:string[]; currentChampionId?:string;
   players:PlayerState[]; courts:CourtState[];
 };
+export type SpectatorCanvasFrame = { index:number; width:number; height:number; dataUrl:string };
+export type SpectatorFrame = {
+  matchId:string; playerId:string; html:string; canvases:SpectatorCanvasFrame[];
+  sequence:number; capturedAt:number; serverReceivedAt?:number;
+};
 
 type Session = { roomCode:string; playerId:string; resumeToken:string; isHost:boolean };
 type Events = {
@@ -26,6 +31,8 @@ type Events = {
   onError:(message:string,code?:string)=>void;
   onKicked:(message:string,bannedName?:string,roomCode?:string)=>void;
   onResumeFailed:()=>void;
+  onSpectatorStreamRequest:(matchId:string,active:boolean)=>void;
+  onSpectatorFrame:(frame:SpectatorFrame)=>void;
 };
 
 const DEVICE_KEY='minute-to-win-it-device-id-v1';
@@ -65,6 +72,8 @@ export class NetworkClient {
       case'joined':{const s:Session={roomCode:p.roomCode,playerId:p.playerId,resumeToken:p.resumeToken,isHost:Boolean(p.isHost)};this.saveSession(s);this.events.onStatus('online');this.events.onJoined(s);break}
       case'room-state':this.events.onRoomState(p.room as RoomState);break;
       case'pong':break;
+      case'spectator-stream-request':this.events.onSpectatorStreamRequest(String(p.matchId||''),Boolean(p.active));break;
+      case'spectator-frame':this.events.onSpectatorFrame(p.frame as SpectatorFrame);break;
       case'error':this.events.onError(p.message||'Something went wrong.',p.code);break;
       case'kicked':this.clearSession();this.events.onKicked(p.message||'You were removed by the host.',p.bannedName,p.roomCode);break;
       case'resume-failed':this.clearSession();this.events.onStatus('online');this.events.onResumeFailed();break;

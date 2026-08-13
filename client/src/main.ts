@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import './styles.css';
 import { GAME_BY_ID, GAMES, PLAYABLE_GAMES, type GameDefinition } from './games';
-import { NetworkClient, type MatchState, type PlayerState, type PrecisionState, type RoomState } from './network';
+import { NetworkClient, type MatchState, type PlayerState, type PrecisionState, type RoomState, type SpectatorFrame } from './network';
 
 const appEl=document.querySelector<HTMLDivElement>('#app')!;
 const DESIGN_W=1280, DESIGN_H=720;
@@ -12,6 +12,19 @@ function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
 function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace'||gameId==='ricochet'||gameId==='knife-wheel'||gameId==='conveyor-chef'||gameId==='pole-balance'||gameId==='fuse')return `${Math.round(value)} pts`;return String(value);}
+
+function safeSpectatorFragment(html:string){
+  const template=document.createElement('template');template.innerHTML=html;
+  template.content.querySelectorAll('script,iframe,object,embed,link,meta,style,img,a,audio,video,source,form').forEach(el=>el.remove());
+  template.content.querySelectorAll<HTMLElement>('*').forEach(el=>{
+    for(const attr of [...el.attributes]){
+      const name=attr.name.toLowerCase(),value=attr.value.toLowerCase();
+      if(name.startsWith('on')||name==='src'||name==='href'||name==='srcdoc'||name==='formaction'||name==='action'||(name==='style'&&(value.includes('url(')||value.includes('expression')||value.includes('javascript:'))))el.removeAttribute(attr.name);
+    }
+    if(el instanceof HTMLButtonElement||el instanceof HTMLInputElement){el.disabled=true;el.tabIndex=-1;}
+  });
+  return template.content;
+}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -52,8 +65,9 @@ const sound=new SoundBank();
 type Session={roomCode:string;playerId:string;resumeToken:string;isHost:boolean};
 
 class MinuteApp{
-  room?:RoomState; session?:Session; status:'connecting'|'online'|'offline'='connecting'; statusDetail=''; message=''; spectatingMatchId?:string;
-  private presenceRepairAt=0;
+  room?:RoomState; session?:Session; status:'connecting'|'online'|'offline'='connecting'; statusDetail=''; message=''; spectatingMatchId?:string; spectatingPlayerId?:string;
+  private presenceRepairAt=0; private serverClockOffset=0; private managePlayersOpen=false; private hostMatchupsMode=false;
+  private spectatorFrames=new Map<string,SpectatorFrame>(); private streamRequestedMatches=new Set<string>();
   controller?:PrecisionController;
   net:NetworkClient;
   constructor(){
@@ -62,8 +76,10 @@ class MinuteApp{
       onJoined:s=>{this.session=s;this.render();},
       onRoomState:r=>this.onRoomState(r),
       onError:m=>{this.message=m;this.toast(m,'error');},
-      onKicked:m=>{this.room=undefined;this.session=undefined;this.spectatingMatchId=undefined;this.message=m;this.render();},
+      onKicked:m=>{this.room=undefined;this.session=undefined;this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;this.message=m;this.render();},
       onResumeFailed:()=>{this.room=undefined;this.session=undefined;this.render();},
+      onSpectatorStreamRequest:(matchId,active)=>this.onSpectatorStreamRequest(matchId,active),
+      onSpectatorFrame:frame=>this.onSpectatorFrame(frame),
     });
     this.session=this.net.session as Session|undefined;
     this.net.start();
@@ -77,7 +93,17 @@ class MinuteApp{
   player(id?:string){return this.room?.players.find(p=>p.id===id)}
   activeMatchFor(id?:string){if(!id||!this.room)return undefined;for(const c of this.room.courts){if(c.activeMatch?.playerIds.includes(id))return c.activeMatch;}return undefined}
   findMatch(id?:string){if(!id||!this.room)return undefined;for(const c of this.room.courts)if(c.activeMatch?.id===id)return c.activeMatch;return undefined}
+  private frameKey(matchId:string,playerId:string){return `${matchId}::${playerId}`}
+  serverNow(){return Date.now()+this.serverClockOffset}
+  isSpectatorStreamRequested(matchId:string){return this.streamRequestedMatches.has(matchId)}
+  private onSpectatorStreamRequest(matchId:string,active:boolean){if(!matchId)return;if(active)this.streamRequestedMatches.add(matchId);else this.streamRequestedMatches.delete(matchId);if(this.controller?.matchId===matchId)this.controller.setSpectatorStreaming(active)}
+  private onSpectatorFrame(frame:SpectatorFrame){if(!frame?.matchId||!frame.playerId)return;this.spectatorFrames.set(this.frameKey(frame.matchId,frame.playerId),frame);if(frame.matchId===this.spectatingMatchId&&frame.playerId===this.spectatingPlayerId)this.applySpectatorFrame(frame)}
+  private beginSpectating(matchId:string,povPlayerId?:string){const match=this.findMatch(matchId);if(!match)return;const candidates=match.playerIds.filter(id=>!this.player(id)?.isBot);const pov=(povPlayerId&&candidates.includes(povPlayerId)?povPlayerId:candidates.find(id=>!match.precision?.results[id]))||candidates[0];if(!pov)return;this.spectatingMatchId=matchId;this.spectatingPlayerId=pov;this.hostMatchupsMode=false;this.net.send({type:'spectate-match',matchId,povPlayerId:pov});this.render()}
+  private stopSpectating(){if(this.spectatingMatchId)this.net.send({type:'stop-spectating'});this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;}
+  private switchSpectatorPov(playerId:string){if(!this.spectatingMatchId||playerId===this.spectatingPlayerId)return;this.spectatingPlayerId=playerId;this.net.send({type:'spectate-match',matchId:this.spectatingMatchId,povPlayerId:playerId});this.render()}
+  private applySpectatorFrame(frame:SpectatorFrame){const root=document.querySelector<HTMLElement>('#spectator-live-root');if(!root||frame.matchId!==this.spectatingMatchId||frame.playerId!==this.spectatingPlayerId)return;root.replaceChildren(safeSpectatorFragment(frame.html));root.querySelectorAll<HTMLButtonElement>('button').forEach(b=>{b.disabled=true;b.tabIndex=-1});root.querySelectorAll<HTMLInputElement>('input').forEach(i=>{i.disabled=true;i.tabIndex=-1});for(const c of frame.canvases||[]){const canvas=root.querySelectorAll<HTMLCanvasElement>('canvas')[c.index];if(!canvas||!/^data:image\/(png|webp);base64,/i.test(c.dataUrl))continue;canvas.width=Math.max(1,c.width);canvas.height=Math.max(1,c.height);const ctx=canvas.getContext('2d'),img=new Image();img.onload=()=>{if(!ctx)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height)};img.src=c.dataUrl;}}
   onRoomState(r:RoomState){
+    const sampleOffset=r.serverTime-Date.now();this.serverClockOffset=this.serverClockOffset?this.serverClockOffset*.75+sampleOffset*.25:sampleOffset;
     this.room=r;
     // Defensive recovery for the same reconnect/presence race we hardened in
     // Dodeca-Gems: if this browser has a healthy socket but the authoritative
@@ -92,23 +118,23 @@ class MinuteApp{
     const live=this.controller?this.findMatch(this.controller.matchId):undefined;
     if(this.controller?.running&&live?.status==='playing'&&live.precision?.phase==='playing'&&!live.precision.results[this.session?.playerId||'']){this.controller.sync(r,live);return;}
     if(this.controller){this.controller.destroy();this.controller=undefined;}
-    if(this.spectatingMatchId&&!this.findMatch(this.spectatingMatchId))this.spectatingMatchId=undefined;
+    if(this.spectatingMatchId&&!this.findMatch(this.spectatingMatchId)){this.net.send({type:'stop-spectating'});this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;}
     this.render();
   }
   render(){
     const old=this.controller;if(old){old.destroy();this.controller=undefined;}
     if(!this.room||!this.session){this.renderStart();return;}
-    if(this.room.phase==='lobby'){this.renderLobby();return;}
-    // Prepared courts are intentionally still in the matchup phase. Keep every
-    // player (including a solo host paired with Minute Bot) on the King of the
-    // Court screen until the host explicitly presses BEGIN MATCHUPS. Routing a
-    // player into a ready match here would show "Preparing challenge…" because
-    // game-specific state is not created until the 3-second start countdown ends.
+    if(this.room.phase==='lobby'){this.stopSpectating();this.hostMatchupsMode=false;this.managePlayersOpen=false;this.renderLobby();return;}
+    // Prepared courts stay on the matchup screen until the host explicitly begins.
     if(this.room.phase==='matchups'){this.renderMatchups();return;}
     const mine=this.activeMatchFor(this.session.playerId);
-    if(mine){this.renderGame(mine,false);return;}
+    // A waiting/late student who gets paired must leave spectator mode
+    // immediately and enter their own countdown/game automatically.
+    if(mine&&!this.me?.isHost){if(this.spectatingMatchId)this.stopSpectating();this.renderGame(mine,false);return;}
     const watched=this.findMatch(this.spectatingMatchId);
     if(watched){this.renderGame(watched,true);return;}
+    if(this.me?.isHost&&this.hostMatchupsMode){this.renderMatchups();return;}
+    if(mine){this.renderGame(mine,false);return;}
     this.renderMatchups();
   }
   shell(inner:string,klass=''){
@@ -139,31 +165,41 @@ class MinuteApp{
   }
   renderMatchups(){
     const room=this.room!,game=this.selectedGame;const champion=room.currentChampionId;const ranked=[...room.players].filter(p=>!p.isBot).sort((a,b)=>a.id===champion?-1:b.id===champion?1:b.points-a.points||a.name.localeCompare(b.name));
-    const courts=room.courts.map((c,i)=>{const m=c.activeMatch;const a=this.player(m?.playerIds[0]),b=this.player(m?.playerIds[1]);const status=m?.status||'waiting';return `<button class="court-card ${i===room.courts.length-1?'championship':''} ${m?'clickable':''}" ${m?`data-watch="${m.id}"`:''}><div class="court-head"><strong>${i===room.courts.length-1?'👑 CHAMPIONSHIP':i===0?'LOWEST COURT':`COURT ${i+1}`}</strong><span class="status ${status}">${status.toUpperCase()}</span></div>${m?`<div class="versus"><div><span class="presence ${a?.connected?'on':''}"></span><strong>${esc(a?.name||'Player')}</strong><small>${a?.points||0} pts</small></div><b>VS</b><div><span class="presence ${b?.connected?'on':''}"></span><strong>${esc(b?.name||'Player')}</strong><small>${b?.points||0} pts</small></div></div>`:`<div class="empty-court">Waiting for two players</div>`}</button>`}).join('');
-    appEl.innerHTML=this.shell(`<section class="matchup-wrap"><div class="matchup-title"><div><span class="eyebrow">KING OF THE COURT</span><h2>${game.symbol} ${esc(game.title)}</h2><p>Winner moves right · Loser moves left · Every win = +1 match point</p></div>${this.me?.isHost?`<div class="host-match-actions">${room.phase==='matchups'?'<button id="begin" class="primary">BEGIN MATCHUPS</button>':''}<button id="return-lobby" class="secondary">RETURN TO LOBBY</button></div>`:''}</div><div class="courts-scroll">${courts}</div><section class="score-strip"><div class="score-label">MATCH POINTS</div>${ranked.map(p=>`<div class="score-tile ${p.id===champion?'champ':''}">${p.id===champion?'👑 ':''}<strong>${esc(p.name)}</strong><span>${p.points}</span></div>`).join('')}</section><div class="spectator-tip">Tap any live court to spectate. Waiting players automatically enter their next match when an opponent is ready.</div></section>`,'matchup-screen');
-    this.bindCommon();document.querySelector('#begin')?.addEventListener('click',()=>this.net.send({type:'begin-matchups'}));document.querySelector('#return-lobby')?.addEventListener('click',()=>this.net.send({type:'return-lobby'}));document.querySelectorAll<HTMLElement>('[data-watch]').forEach(el=>el.addEventListener('click',()=>{this.spectatingMatchId=el.dataset.watch;this.render()}));
+    const waitingSet=new Set(room.courts.flatMap(c=>c.waiting));const lateSet=new Set(room.lateJoinQueue);
+    const courts=room.courts.map((c,i)=>{const m=c.activeMatch;const a=this.player(m?.playerIds[0]),b=this.player(m?.playerIds[1]);const status=m?.status||'waiting';const queued=c.waiting.map(id=>this.player(id)).filter(Boolean) as PlayerState[];const waitingLine=queued.length?`<div class="court-waiting"><small>NEXT / WAITING</small><span>${queued.map(p=>esc(p.name)).join(' · ')}</span></div>`:'';return `<button class="court-card ${i===room.courts.length-1?'championship':''} ${m&&m.status!=='ready'?'clickable':''}" ${m&&m.status!=='ready'?`data-watch="${m.id}"`:''}><div class="court-head"><strong>${i===room.courts.length-1?'👑 CHAMPIONSHIP':i===0?'LOWEST COURT':`COURT ${i+1}`}</strong><span class="status ${status}">${status.toUpperCase()}</span></div>${m?`<div class="versus"><div><span class="presence ${a?.connected?'on':''}"></span><strong>${esc(a?.name||'Player')}</strong><small>${a?.isBot?'BOT':`${a?.points||0} pts`}</small></div><b>VS</b><div><span class="presence ${b?.connected?'on':''}"></span><strong>${esc(b?.name||'Player')}</strong><small>${b?.isBot?'BOT':`${b?.points||0} pts`}</small></div></div>${waitingLine}`:`<div class="empty-court">${waitingLine||'Waiting for two players'}</div>`}</button>`}).join('');
+    const manageRows=room.players.filter(p=>!p.isHost&&!p.isBot).sort((a,b)=>a.name.localeCompare(b.name)).map(p=>{const active=room.courts.find(c=>c.activeMatch?.playerIds.includes(p.id));const waiting=room.courts.find(c=>c.waiting.includes(p.id));const status=!p.connected?'OFFLINE':active?`PLAYING · COURT ${active.index+1}`:lateSet.has(p.id)?'WAITING TO PAIR':waitingSet.has(p.id)?`WAITING · COURT ${(waiting?.index??0)+1}`:'SPECTATING / AVAILABLE';return `<div class="manage-player-row"><div><span class="presence ${p.connected?'on':''}"></span><strong>${esc(p.name)}</strong><small>${status}</small></div><button class="danger small" data-manage-kick="${p.id}">REMOVE</button></div>`}).join('');
+    const manageOverlay=this.me?.isHost&&this.managePlayersOpen?`<div class="manage-backdrop" id="manage-backdrop"><section class="manage-modal"><div class="manage-head"><div><span class="eyebrow">HOST CONTROLS</span><h3>Manage Players</h3><p>Remove inappropriate names, disconnected devices or students who should leave the room.</p></div><button id="close-manage" class="icon-btn">✕</button></div><div class="manage-player-list">${manageRows||'<div class="empty-court">No students are currently in the room.</div>'}</div><div class="manage-foot">Removing an active player awards that match to their opponent so the court can keep moving.</div></section></div>`:'';
+    const waitingBanner=!this.activeMatchFor(this.session?.playerId)&&!this.me?.isHost?`<div class="waiting-spectator-banner">👁 YOU ARE WAITING · Tap any live court to spectate. You will automatically enter your match when paired.</div>`:'';
+    appEl.innerHTML=this.shell(`<section class="matchup-wrap"><div class="matchup-title"><div><span class="eyebrow">KING OF THE COURT</span><h2>${game.symbol} ${esc(game.title)}</h2><p>Winner moves right · Loser moves left · Every win = +1 match point</p></div>${this.me?.isHost?`<div class="host-match-actions">${room.phase==='matchups'?'<button id="begin" class="primary">BEGIN MATCHUPS</button>':''}<button id="manage-players" class="secondary">👥 MANAGE PLAYERS</button><button id="return-lobby" class="secondary">RETURN TO LOBBY</button></div>`:''}</div>${waitingBanner}<div class="courts-scroll">${courts}</div><section class="score-strip"><div class="score-label">MATCH POINTS</div>${ranked.map(p=>`<div class="score-tile ${p.id===champion?'champ':''}">${p.id===champion?'👑 ':''}<strong>${esc(p.name)}</strong><span>${p.points}</span></div>`).join('')}</section><div class="spectator-tip">Tap any live court to watch the actual player view. Late players are paired automatically on the lowest court when an eligible opponent is available.</div></section>${manageOverlay}`,'matchup-screen');
+    this.bindCommon();document.querySelector('#begin')?.addEventListener('click',()=>{this.hostMatchupsMode=false;this.net.send({type:'begin-matchups'})});document.querySelector('#return-lobby')?.addEventListener('click',()=>this.net.send({type:'return-lobby'}));document.querySelector('#manage-players')?.addEventListener('click',()=>{this.managePlayersOpen=true;this.renderMatchups()});document.querySelector('#close-manage')?.addEventListener('click',()=>{this.managePlayersOpen=false;this.renderMatchups()});document.querySelector('#manage-backdrop')?.addEventListener('click',e=>{if(e.target===e.currentTarget){this.managePlayersOpen=false;this.renderMatchups()}});document.querySelectorAll<HTMLElement>('[data-manage-kick]').forEach(el=>el.addEventListener('click',()=>{const pl=this.player(el.dataset.manageKick);if(!pl)return;if(window.confirm(`Remove ${pl.name} from the room? They must use a different name to rejoin.`))this.net.send({type:'kick-player',playerId:pl.id})}));document.querySelectorAll<HTMLElement>('[data-watch]').forEach(el=>el.addEventListener('click',()=>this.beginSpectating(String(el.dataset.watch||''))));
   }
   renderGame(match:MatchState,spectator:boolean){
-    const game=GAME_BY_ID.get(match.precision?.gameId||this.room!.selectedGameId)||this.selectedGame;const a=this.player(match.playerIds[0]),b=this.player(match.playerIds[1]);const champ=match.courtIndex===this.room!.courts.length-1;
+    const game=GAME_BY_ID.get(match.precision?.gameId||this.room!.selectedGameId)||this.selectedGame;const a=this.player(match.playerIds[0]),b=this.player(match.playerIds[1]);const champ=match.courtIndex===this.room!.courts.length-1;const hostCanNavigate=Boolean(this.me?.isHost);const navButton=spectator||hostCanNavigate?'<button id="back-matchups" class="secondary small">← MATCHUPS</button>':'';
     if(match.status==='countdown'){
-      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div></div><div class="countdown-card"><small>NEXT MATCHUP STARTS</small><div id="countdown-number">3</div><h3>${esc(a?.name)} <span>VS</span> ${esc(b?.name)}</h3><p>${esc(game.tagline)}</p></div></section>`,'game-screen');this.bindCommon();return;
+      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${spectator?'👁 LIVE SPECTATOR':champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div><div class="game-nav">${navButton}</div></div><div class="countdown-card"><small>NEXT MATCHUP STARTS</small><div id="countdown-number">3</div><h3>${esc(a?.name)} <span>VS</span> ${esc(b?.name)}</h3><p>${esc(game.tagline)}</p></div></section>`,'game-screen');this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});return;
     }
     const precision=match.precision;
-    if(!precision){appEl.innerHTML=this.shell(`<div class="loading-card">Preparing challenge…</div>`);this.bindCommon();return;}
+    if(!precision){appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${spectator?'👁 LIVE SPECTATOR':'MATCH'}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="game-nav">${navButton}</div></div><div class="loading-card">Preparing challenge…</div></section>`,'game-screen');this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});return;}
     if(precision.phase==='results'){
       const winner=this.player(precision.winnerId);const ra=precision.results[match.playerIds[0]],rb=precision.results[match.playerIds[1]];
-      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="result-card"><span class="eyebrow">${game.title.toUpperCase()} RESULT</span><div class="trophy">🏆</div><h2>${esc(winner?.name)} WINS</h2><div class="result-versus"><div><strong>${esc(a?.name)}</strong><span>${esc(ra?.display||'—')}</span></div><b>VS</b><div><strong>${esc(b?.name)}</strong><span>${esc(rb?.display||'—')}</span></div></div><div class="move-right">+1 MATCH POINT · WINNER MOVES RIGHT →</div></div></section>`,'game-screen');this.bindCommon();sound.beep(760,.12);return;
+      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header result-nav-header"><div><span class="eyebrow">${spectator?'👁 LIVE SPECTATOR':'MATCH COMPLETE'}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="game-nav">${navButton}</div></div><div class="result-card"><span class="eyebrow">${game.title.toUpperCase()} RESULT</span><div class="trophy">🏆</div><h2>${esc(winner?.name)} WINS</h2><div class="result-versus"><div><strong>${esc(a?.name)}</strong><span>${esc(ra?.display||'—')}</span></div><b>VS</b><div><strong>${esc(b?.name)}</strong><span>${esc(rb?.display||'—')}</span></div></div><div class="move-right">+1 MATCH POINT · WINNER MOVES RIGHT →</div></div></section>`,'game-screen');this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});sound.beep(760,.12);return;
     }
-    appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${spectator?'👁 SPECTATING':champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div><div class="game-nav">${spectator?'<button id="back-matchups" class="secondary small">← MATCHUPS</button>':'<button id="view-matchups" class="secondary small">VIEW MATCHUPS</button>'}</div></div><div id="precision-stage" class="precision-stage"></div></section>`,'game-screen');
-    this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.spectatingMatchId=undefined;this.render()});document.querySelector('#view-matchups')?.addEventListener('click',()=>{this.spectatingMatchId=undefined;this.renderMatchups()});
-    const myId=this.session!.playerId;const isParticipant=match.playerIds.includes(myId);if(!spectator&&isParticipant&&!precision.results[myId]){this.controller=new PrecisionController(this,match,precision,game);this.controller.start();}else this.renderPrecisionWatcher(match,precision,game,spectator);
+    if(spectator){
+      const humans=match.playerIds.filter(id=>!this.player(id)?.isBot);let pov=this.spectatingPlayerId;if(!pov||!humans.includes(pov)||(precision.results[pov]&&humans.some(id=>!precision.results[id])))pov=humans.find(id=>!precision.results[id])||humans[0];this.spectatingPlayerId=pov;
+      if(pov)this.net.send({type:'spectate-match',matchId:match.id,povPlayerId:pov});
+      const povButtons=humans.length>1?`<div class="pov-switch">${humans.map(id=>`<button class="pov-btn ${id===pov?'active':''}" data-pov="${id}">👁 ${esc(this.player(id)?.name||'Player')}</button>`).join('')}</div>`:`<div class="pov-switch"><span>👁 Watching ${esc(this.player(pov)?.name||'Player')}</span></div>`;
+      appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">👁 LIVE SPECTATOR · COURT ${match.courtIndex+1}</span><h2>${game.symbol} ${esc(game.title)}</h2></div>${povButtons}<div class="game-nav"><button id="back-matchups" class="secondary small">← MATCHUPS</button></div></div><div id="precision-stage" class="precision-stage spectator-stage"><div id="spectator-live-root" class="spectator-live-root"><div class="spectator-feed-loading"><div class="spinner"></div><strong>CONNECTING TO LIVE PLAYER VIEW…</strong><small>Timers, positions and scores are streamed from the actual game.</small></div></div></div></section>`,'game-screen');
+      this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});document.querySelectorAll<HTMLElement>('[data-pov]').forEach(el=>el.addEventListener('click',()=>this.switchSpectatorPov(String(el.dataset.pov||''))));const cached=pov?this.spectatorFrames.get(this.frameKey(match.id,pov)):undefined;if(cached)this.applySpectatorFrame(cached);return;
+    }
+    appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div><div class="game-nav">${hostCanNavigate?'<button id="back-matchups" class="secondary small">← MATCHUPS</button>':''}</div></div><div id="precision-stage" class="precision-stage"></div></section>`,'game-screen');
+    this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.hostMatchupsMode=true;this.renderMatchups()});const myId=this.session!.playerId;const isParticipant=match.playerIds.includes(myId);if(isParticipant&&!precision.results[myId]){this.controller=new PrecisionController(this,match,precision,game);this.controller.start();}else this.renderPrecisionWatcher(match,precision,game,false);
   }
   renderPrecisionWatcher(match:MatchState,p:PrecisionState,game:GameDefinition,spectator:boolean){
     const stage=document.querySelector<HTMLElement>('#precision-stage');if(!stage)return;const cells=match.playerIds.map(id=>{const pl=this.player(id),r=p.results[id],prog=p.progress[id];return `<div class="watch-player"><span class="presence ${pl?.connected?'on':''}"></span><h3>${esc(pl?.name)}</h3>${r?`<div class="submitted">✓ FINISHED<strong>${esc(r.display)}</strong></div>`:`<div class="live-progress"><strong>${esc(prog?.label||'PLAYING')}</strong><span>${prog?.round?`Round ${prog.round}`:'In progress…'}</span>${typeof prog?.value==='number'?`<em>${precisionProgressText(game.id,prog.value)}</em>`:''}</div>`}</div>`}).join('');stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${game.symbol}</div><h2>${spectator?'LIVE SPECTATOR':'RESULT SUBMITTED'}</h2><p>${spectator?'This is a read-only live view.':'Waiting for your opponent to finish.'}</p><div class="watch-grid">${cells}</div></div>`;
   }
   tick(){
-    const num=document.querySelector<HTMLElement>('#countdown-number');if(num&&this.room){const m=this.activeMatchFor(this.session?.playerId)||this.findMatch(this.spectatingMatchId);if(m?.startsAt){const n=Math.max(1,Math.ceil((m.startsAt-Date.now())/1000));num.textContent=String(n)}}
-    const pause=this.room&&this.activeMatchFor(this.session?.playerId)?.disconnectPause;if(pause){const pl=this.player(pause.playerId);this.showPersistentNotice(`${pl?.name||'Player'} disconnected — waiting up to ${Math.max(0,Math.ceil((pause.graceUntil-Date.now())/1000))}s to reconnect`)}else this.clearPersistentNotice();
+    const num=document.querySelector<HTMLElement>('#countdown-number');if(num&&this.room){const m=this.findMatch(this.spectatingMatchId)||this.activeMatchFor(this.session?.playerId);if(m?.startsAt){const n=Math.max(1,Math.ceil((m.startsAt-this.serverNow())/1000));num.textContent=String(n)}}
+    const pause=this.room&&(this.findMatch(this.spectatingMatchId)?.disconnectPause||this.activeMatchFor(this.session?.playerId)?.disconnectPause);if(pause){const pl=this.player(pause.playerId);this.showPersistentNotice(`${pl?.name||'Player'} disconnected — waiting up to ${Math.max(0,Math.ceil((pause.graceUntil-this.serverNow())/1000))}s to reconnect`)}else this.clearPersistentNotice();
   }
   toast(msg:string,type='info'){let el=document.querySelector<HTMLElement>('#toast');if(!el){el=document.createElement('div');el.id='toast';document.body.appendChild(el)}el.className=`toast ${type}`;el.textContent=msg;el.classList.add('show');setTimeout(()=>el?.classList.remove('show'),3600)}
   showPersistentNotice(msg:string){let el=document.querySelector<HTMLElement>('#persistent');if(!el){el=document.createElement('div');el.id='persistent';document.body.appendChild(el)}el.textContent=msg;el.className='persistent show';}
@@ -171,10 +207,13 @@ class MinuteApp{
 }
 
 class PrecisionController{
-  app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
+  app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number; private spectatorTimer?:number; private spectatorSequence=0;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();}
-  destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
+  start(){this.running=true;this.setSpectatorStreaming(this.app.isSpectatorStreamRequested(this.matchId));if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();}
+  destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
+  setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),100);}
+  private publishSpectatorFrame(){if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;const canvases=[...stage.querySelectorAll<HTMLCanvasElement>('canvas')].slice(0,3).map((canvas,index)=>{let dataUrl='';try{dataUrl=canvas.toDataURL('image/webp',.72);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png')}catch{}return{index,width:canvas.width,height:canvas.height,dataUrl}}).filter(c=>c.dataUrl);this.app.net.send({type:'spectator-frame',matchId:this.matchId,sequence:++this.spectatorSequence,capturedAt:Date.now(),html:stage.innerHTML,canvases});}
+
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
   sendProgress(round:number,label:string,value?:number){this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value});}
@@ -200,13 +239,30 @@ class PrecisionController{
     });
     await sleep(800);
     for(let trial=0;trial<5&&!this.destroyed;trial++){
+      // Arm this trial BEFORE the first red light starts building. Previously an
+      // extremely early tap could set phase='locked' while resolveTap still
+      // pointed at the previous/no-op resolver, leaving the new trial waiting
+      // forever with the red lights stuck on screen.
+      let trialResolved=false;
+      const resultPromise=new Promise<TapResult>(resolve=>{
+        resolveTap=(value)=>{if(trialResolved)return;trialResolved=true;resolve(value);};
+      });
       trialEl.textContent=String(trial+1);document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go','false');pad.innerHTML='WAIT…<small>Do not anticipate</small>';msg.textContent='LIGHTS BUILDING';phase='waiting';
-      for(let i=0;i<5;i++){await sleep(300);if(this.destroyed)return;document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);}
-      const delay=650+seededUnit(this.state.seed,trial)*1800;
-      const resultPromise=new Promise<TapResult>(r=>resolveTap=r);
-      const outPromise=(async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
-      void outPromise;
+      for(let i=0;i<5;i++){
+        await sleep(300);if(this.destroyed)return;
+        // A false start during the build ends this trial immediately. Do not keep
+        // illuminating later lights after the attempt has already been recorded.
+        if(phase!=='waiting')break;
+        document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);
+      }
+      if(phase==='waiting'){
+        const delay=650+seededUnit(this.state.seed,trial)*1800;
+        void (async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{if(this.destroyed||phase!=='waiting'){r();return;}document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
+      }
       const tap=await resultPromise;if(this.destroyed)return;
+      // Always clear the visual lights as soon as a false start/reaction is
+      // accepted, so the next attempt never inherits a stuck red-light state.
+      document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));
       const reaction=Math.round(tap.score);scores.push(reaction);falseStartFlags.push(tap.falseStart);
       if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
       history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
