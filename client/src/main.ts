@@ -27,7 +27,24 @@ new Phaser.Game({type:Phaser.AUTO,width:DESIGN_W,height:DESIGN_H,parent:'phaser-
 
 class SoundBank{
   enabled=localStorage.getItem('mtwi-sound')!=='off';
-  toggle(){this.enabled=!this.enabled;localStorage.setItem('mtwi-sound',this.enabled?'on':'off');}
+  music=new Audio('./audio/alex-morgan-video-game-pixel-chiptune-music-583271.mp3');
+  constructor(){
+    this.music.loop=true;
+    this.music.preload='auto';
+    this.music.volume=.22;
+    const unlock=()=>{if(this.enabled)this.playMusic();};
+    window.addEventListener('pointerdown',unlock,{capture:true});
+    window.addEventListener('keydown',unlock,{capture:true});
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&this.enabled)this.playMusic();});
+    if(this.enabled)this.playMusic();
+  }
+  private playMusic(){if(!this.enabled)return;void this.music.play().catch(()=>{});}
+  toggle(){
+    this.enabled=!this.enabled;
+    localStorage.setItem('mtwi-sound',this.enabled?'on':'off');
+    if(this.enabled)this.playMusic();else this.music.pause();
+    return this.enabled;
+  }
   beep(freq=520,duration=.06){if(!this.enabled)return;try{const C=(window.AudioContext||(window as any).webkitAudioContext);const ctx=new C();const o=ctx.createOscillator(),gain=ctx.createGain();o.frequency.value=freq;gain.gain.value=.045;o.connect(gain);gain.connect(ctx.destination);o.start();gain.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+duration);o.stop(ctx.currentTime+duration+.01);}catch{}}
 }
 const sound=new SoundBank();
@@ -97,7 +114,7 @@ class MinuteApp{
   shell(inner:string,klass=''){
     return `<main class="screen ${klass}"><header class="topbar"><div class="brand-mini"><span class="brand-stopwatch">⏱</span><div><strong>MINUTE TO WIN IT</strong><small>ONE COURT · ONE CHALLENGE · KEEP MOVING RIGHT</small></div></div>${this.room?`<div class="room-pill"><small>ROOM</small><strong>${esc(this.room.code)}</strong></div>`:''}<button id="sound-toggle" class="icon-btn">${sound.enabled?'🔊':'🔇'}</button><div id="connection-badge" class="connection ${this.status}">${this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING'}</div></header>${inner}</main>`;
   }
-  bindCommon(){document.querySelector('#sound-toggle')?.addEventListener('click',()=>{sound.toggle();sound.beep();this.render();});}
+  bindCommon(){const btn=document.querySelector<HTMLButtonElement>('#sound-toggle');btn?.addEventListener('click',()=>{const enabled=sound.toggle();btn.textContent=enabled?'🔊':'🔇';if(enabled)sound.beep();});}
   updateConnectionBadge(){const el=document.querySelector('#connection-badge');if(el){el.className=`connection ${this.status}`;el.textContent=this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING';}}
   renderStart(){
     appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>13 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
@@ -565,7 +582,7 @@ class PrecisionController{
   }
   async runTrace(){
     const stage=this.stage();if(!stage)return;
-    const paths=3,maxScore=300,points:number[]=[],avgErrors:number[]=[];
+    const paths=3,maxScore=300,points:number[]=[],avgErrors:number[]=[],traceTimes:number[]=[];
     const x0=.07,x1=.93,sampleCount=48;
     const pathY=(round:number,t:number)=>{
       const a1=.105+seededUnit(this.state.seed,1600+round*10)*.055;
@@ -597,7 +614,7 @@ class PrecisionController{
         <div id="trace-overlay" class="trace-overlay"><strong>PRESS START</strong><small>Hold and trace the glowing line to the finish</small></div>
       </div>
       <div class="trace-controls">
-        <div class="trace-status-card"><small>TRACE CONTROL</small><strong id="trace-status">GET READY</strong><em id="trace-detail">Accuracy matters more than speed</em></div>
+        <div class="trace-status-card"><small>TRACE CONTROL</small><strong id="trace-status">GET READY</strong><em id="trace-detail">Accuracy is the main score · speed adds up to a 100% multiplier</em></div>
         <div class="trace-time"><div id="trace-time-fill"></div><span id="trace-time-label">9.0 s</span></div>
         <div class="trace-tip">✋ Keep your finger / pointer down and follow the route</div>
         <div id="trace-history" class="trace-history"></div>
@@ -631,11 +648,11 @@ class PrecisionController{
       const resultPromise=new Promise<TraceResult>(resolve=>{resolveRound=resolve;noStartTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='waiting')return;phase='locked';resolve({kind:'no-start'});},4000);this.timers.push(noStartTimer)});
       const animate=(now:number)=>{if(this.destroyed||phase==='locked'||phase==='idle')return;if(phase==='waiting'){const left=Math.max(0,100-(now-waitStarted)/40);timeFill.style.width=`${left}%`;timeLabel.textContent=`START ${(Math.max(0,4-(now-waitStarted)/1000)).toFixed(1)} s`;}else if(phase==='tracing'){const elapsed=now-startedAt,left=Math.max(0,100-elapsed/90);timeFill.style.width=`${left}%`;timeLabel.textContent=`${Math.max(0,9-elapsed/1000).toFixed(1)} s`;if(elapsed>=9000){phase='locked';resolveRound({kind:'timeout'});return;}}this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
       const result=await resultPromise;clearTimeout(noStartTimer);clearTimeout(traceTimer);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;activePointer=-1;
-      const missing=Math.max(0,sampleCount-sampleErrors.length),fallbackError=Math.max(54,arena.clientHeight*.20);const allErrors=[...sampleErrors,...Array.from({length:missing},()=>fallbackError)];const avgError=allErrors.reduce((a,b)=>a+b,0)/sampleCount;const completion=sampleErrors.length/sampleCount;let earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-Math.max(0,avgError-4)*1.45)));if(result.kind==='timeout')earned=Math.round(earned*(.45+.55*completion));points.push(earned);avgErrors.push(avgError);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
-      let feedback='';if(result.kind==='no-start'){feedback='NO TRACE';status.className='bad';status.textContent='NO START — 0 POINTS';detail.textContent='The next path loads automatically';arena.classList.add('failed');sound.beep(180,.09);}else if(result.kind==='timeout'){feedback='TIME OUT';status.className=earned>=65?'okay':'bad';status.textContent=`TIME OUT — ${earned} POINTS`;detail.textContent=`${Math.round(completion*100)}% completed · ${avgError.toFixed(1)} px avg error`;arena.classList.add(earned>=65?'okay':'failed');sound.beep(earned>=65?560:220,.08);}else{feedback=earned>=96?'LASER PRECISE!':earned>=86?'EXCELLENT TRACE!':earned>=72?'GREAT TRACE!':earned>=55?'SOLID TRACE!':'WIDE TRACE';status.className=earned>=86?'good':earned>=60?'okay':'warn';status.textContent=`${feedback} — ${earned} PTS`;detail.textContent=`${avgError.toFixed(1)} px average deviation`;arena.classList.add(earned>=86?'success':earned>=55?'okay':'failed');sound.beep(earned>=95?980:earned>=75?760:earned>=55?520:300,.075);}
-      overlay.classList.remove('hidden');overlay.innerHTML=`<strong>${result.kind==='finished'?'PATH COMPLETE':feedback}</strong><small>${earned} points · ${avgError.toFixed(1)} px average deviation</small>`;history.innerHTML=points.map((v,i)=>`<span class="${v>=86?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,result.kind==='finished'?feedback:result.kind==='no-start'?'NO TRACE':'TIME OUT',total);await sleep(1050);phase='idle';
+      const missing=Math.max(0,sampleCount-sampleErrors.length),fallbackError=Math.max(54,arena.clientHeight*.20);const allErrors=[...sampleErrors,...Array.from({length:missing},()=>fallbackError)];const avgError=allErrors.reduce((a,b)=>a+b,0)/sampleCount;const completion=sampleErrors.length/sampleCount;const elapsedMs=result.kind==='no-start'?9000:Math.min(9000,Math.max(0,performance.now()-startedAt));let accuracyScore=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-Math.max(0,avgError-4)*1.45)));if(result.kind==='timeout')accuracyScore=Math.round(accuracyScore*(.45+.55*completion));const speedMultiplier=result.kind==='no-start'?0:Math.max(.85,Math.min(1,1-Math.max(0,elapsedMs-3000)/6000*.15));const earned=result.kind==='no-start'?0:Math.round(accuracyScore*speedMultiplier);points.push(earned);avgErrors.push(avgError);traceTimes.push(elapsedMs);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
+      const speedPct=Math.round(speedMultiplier*100);const elapsedText=`${(elapsedMs/1000).toFixed(2)} s`;let feedback='';if(result.kind==='no-start'){feedback='NO TRACE';status.className='bad';status.textContent='NO START — 0 POINTS';detail.textContent='The next path loads automatically';arena.classList.add('failed');sound.beep(180,.09);}else if(result.kind==='timeout'){feedback='TIME OUT';status.className=earned>=65?'okay':'bad';status.textContent=`TIME OUT — ${earned} POINTS`;detail.textContent=`${Math.round(completion*100)}% completed · ${avgError.toFixed(1)} px avg · ${speedPct}% speed`;arena.classList.add(earned>=65?'okay':'failed');sound.beep(earned>=65?560:220,.08);}else{feedback=earned>=96?'LASER PRECISE!':earned>=86?'EXCELLENT TRACE!':earned>=72?'GREAT TRACE!':earned>=55?'SOLID TRACE!':'WIDE TRACE';status.className=earned>=86?'good':earned>=60?'okay':'warn';status.textContent=`${feedback} — ${earned} PTS`;detail.textContent=`${avgError.toFixed(1)} px avg · ${elapsedText} · ${speedPct}% speed multiplier`;arena.classList.add(earned>=86?'success':earned>=55?'okay':'failed');sound.beep(earned>=95?980:earned>=75?760:earned>=55?520:300,.075);}
+      overlay.classList.remove('hidden');overlay.innerHTML=result.kind==='no-start'?`<strong>NO TRACE</strong><small>0 points · no trace started</small>`:`<strong>${result.kind==='finished'?'PATH COMPLETE':feedback}</strong><small>${earned} pts · accuracy ${accuracyScore}/100 × speed ${speedPct}% · ${elapsedText}</small>`;history.innerHTML=points.map((v,i)=>`<span class="${v>=86?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,result.kind==='finished'?feedback:result.kind==='no-start'?'NO TRACE':'TIME OUT',total);await sleep(1050);phase='idle';
     }
-    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),overallError=avgErrors.reduce((a,b)=>a+b,0)/Math.max(1,avgErrors.length),secondary=Math.min(50000,Math.round(avgErrors.reduce((a,b)=>a+b,0)*100));this.sendResult(total,secondary,`${total} / 300 pts · ${overallError.toFixed(1)} px avg error`,points);
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),overallError=avgErrors.reduce((a,b)=>a+b,0)/Math.max(1,avgErrors.length),avgTime=traceTimes.reduce((a,b)=>a+b,0)/Math.max(1,traceTimes.length),secondary=Math.min(50000,Math.round(avgErrors.reduce((a,b)=>a+b,0)*100));this.sendResult(total,secondary,`${total} / 300 pts · ${overallError.toFixed(1)} px avg · ${(avgTime/1000).toFixed(2)} s avg`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
