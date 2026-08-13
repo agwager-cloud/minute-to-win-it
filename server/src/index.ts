@@ -3806,7 +3806,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
         submitPrecisionResult(room, live.court, live.match, botId, {
           score,
           secondary,
-          display: `${score} / 1000 pts · ${(score / 10).toFixed(1)}% in line`,
+          display: `${score} / 1000 pts · ${(score / 10).toFixed(1)}% drift quality`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
