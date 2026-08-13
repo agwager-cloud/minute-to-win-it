@@ -1,0 +1,1 @@
+{"name":"minute-to-win-it-client","private":true,"version":"0.1.0","type":"module","scripts":{"dev":"vite --host 0.0.0.0 --port 5173","build":"tsc --noEmit --pretty false && vite build","typecheck":"tsc --noEmit --pretty false"},"dependencies":{"phaser":"^3.90.0"},"devDependencies":{"@types/node":"^24.0.0","typescript":"^5.8.3","vite":"^7.0.0"}}
