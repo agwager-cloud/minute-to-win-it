@@ -346,6 +346,7 @@ type ClientMessage =
   | { type: 'select-game'; gameId: string }
   | { type: 'set-turn-seconds'; seconds: number }
   | { type: 'kick-player'; playerId: string }
+  | { type: 'host-logout' }
   | { type: 'prepare-matchups' }
   | { type: 'begin-matchups' }
   | { type: 'resolve-match'; matchId: string; winnerId: string }
@@ -653,35 +654,37 @@ function prepareCourts(room: Room) {
     if (player.isBot) room.players.delete(id);
   }
 
-  const students = shuffled([...room.players.values()].filter((p) => !p.isHost && !p.isBot && p.connected));
+  // The host is a real player whenever there is another human available. This
+  // fixes the Host + 1 student case, which must be a human-vs-human match rather
+  // than Student vs Bot with the teacher spectating.
+  const humans = shuffled([...room.players.values()].filter((p) => !p.isBot && p.connected));
   room.courts = [];
 
-  if (students.length === 0) {
-    // Keep the proven solo host test path, but the host is never used as a
-    // classroom parity filler once real students are present.
+  if (humans.length === 1) {
     const bot = createPracticeBot();
     room.players.set(bot.id, bot);
     room.hostParticipating = true;
-    room.courts.push({ index: 0, activeMatch: makeMatch(0, host.id, bot.id, 'ready'), waiting: [] });
+    room.courts.push({ index: 0, activeMatch: makeMatch(0, humans[0].id, bot.id, 'ready'), waiting: [] });
   } else {
-    room.hostParticipating = false;
+    room.hostParticipating = humans.some((p) => p.id === room.hostId);
     let courtIndex = 0;
 
-    // For an odd class, keep the teacher free to manage/spectate and place a
-    // Minute Bot on the LOWEST court. The first late student can replace that
-    // bot cleanly without disturbing any higher court.
-    if (students.length % 2 === 1) {
+    // Odd human totals need exactly one parity bot. Prefer the host as the bot's
+    // opponent so every student can still receive a human opponent; even totals
+    // contain no bots at all.
+    if (humans.length % 2 === 1) {
       const bot = createPracticeBot();
       room.players.set(bot.id, bot);
-      const lowStudent = students.shift()!;
-      room.courts.push({ index: courtIndex, activeMatch: makeMatch(courtIndex, lowStudent.id, bot.id, 'ready'), waiting: [] });
+      const hostIndex = humans.findIndex((p) => p.id === room.hostId);
+      const parityHuman = hostIndex >= 0 ? humans.splice(hostIndex, 1)[0] : humans.shift()!;
+      room.courts.push({ index: courtIndex, activeMatch: makeMatch(courtIndex, parityHuman.id, bot.id, 'ready'), waiting: [] });
       courtIndex += 1;
     }
 
-    for (let i = 0; i < students.length; i += 2) {
+    for (let i = 0; i < humans.length; i += 2) {
       room.courts.push({
         index: courtIndex,
-        activeMatch: makeMatch(courtIndex, students[i].id, students[i + 1].id, 'ready'),
+        activeMatch: makeMatch(courtIndex, humans[i].id, humans[i + 1].id, 'ready'),
         waiting: [],
       });
       courtIndex += 1;
@@ -4410,10 +4413,9 @@ function connectedLateJoinerCount(room: Room) {
 
 function integrateLateJoiners(room: Room) {
   if (room.phase === 'lobby') return;
-  if (room.hostParticipating && playerActiveMatch(room, room.hostId) && connectedLateJoinerCount(room) > 0) room.hostExitAfterMatch = true;
 
-  // First priority: replace a parity bot on the lowest court. This lets a single
-  // late student enter immediately without making the teacher play.
+  // First priority: replace a parity/practice bot that has not begun its current
+  // match. The late player therefore receives a human opponent immediately.
   while (connectedLateJoinerCount(room) > 0) {
     const next = takeNextConnectedLateJoiner(room);
     if (!next) break;
@@ -4422,9 +4424,7 @@ function integrateLateJoiners(room: Room) {
     break;
   }
 
-  // Remaining late students pair with EACH OTHER. Every new pair gets a brand
-  // new lowest court, so nobody jumps into the middle of the ladder and the host
-  // remains completely free to manage and spectate.
+  // Pair late students with one another on brand-new lowest courts.
   while (connectedLateJoinerCount(room) >= 2) {
     const a = takeNextConnectedLateJoiner(room);
     const b = takeNextConnectedLateJoiner(room);
@@ -4435,20 +4435,30 @@ function integrateLateJoiners(room: Room) {
     }
     createNewLowestLateMatch(room, a, b);
   }
+
+  // If exactly one late player remains and there is no parity bot anywhere in the
+  // ladder, give that player a temporary Minute Bot on a new lowest court. A later
+  // human replaces the bot at the next clean boundary.
+  if (connectedLateJoinerCount(room) === 1) {
+    const botExists = room.courts.some((court) =>
+      court.activeMatch?.playerIds.some((id) => room.players.get(id)?.isBot) ||
+      court.waiting.some((id) => room.players.get(id)?.isBot));
+    if (!botExists) {
+      const late = takeNextConnectedLateJoiner(room);
+      if (late) {
+        const bot = createPracticeBot();
+        room.players.set(bot.id, bot);
+        createNewLowestLateMatch(room, late, bot.id);
+      }
+    }
+  }
 }
 
 function rebalanceHostAfterRemoval(room: Room) {
   if (room.phase === 'lobby') return;
-  // Classroom host is an observer/manager. Never insert the teacher as a parity
-  // player because a removal changed the class from even to odd.
-  const active = playerActiveMatch(room, room.hostId);
-  if (active) {
-    room.hostExitAfterMatch = true;
-    return;
-  }
-  for (const court of room.courts) court.waiting = court.waiting.filter((id) => id !== room.hostId);
-  room.hostParticipating = false;
+  const host = room.players.get(room.hostId);
   room.hostExitAfterMatch = false;
+  room.hostParticipating = Boolean(host?.connected && (playerActiveMatch(room, room.hostId) || playerWaitingCourt(room, room.hostId)));
 }
 
 function kickPlayerFromRoom(room: Room, targetId: string) {
@@ -4524,22 +4534,15 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
     if (latePlayerId && humanId) {
       court.activeMatch = undefined;
       court.waiting = court.waiting.filter((id) => id !== botId && id !== humanId);
-      if (humanId === room.hostId) {
-        // A student arrived during solo Host vs Bot testing. Keep the bot as the
-        // student's temporary opponent and release the teacher to spectate/manage.
-        room.hostParticipating = false;
-        room.hostExitAfterMatch = false;
-        const nextMatch = makeMatch(court.index, latePlayerId, botId, 'ready');
-        court.activeMatch = nextMatch;
-        scheduleMatchStart(room, court, nextMatch);
-      } else {
-        // Odd-class parity bot lives on the lowest court. The first late student
-        // replaces it at this clean match boundary.
-        room.players.delete(botId);
-        const nextMatch = makeMatch(court.index, humanId, latePlayerId, 'ready');
-        court.activeMatch = nextMatch;
-        scheduleMatchStart(room, court, nextMatch);
-      }
+      // The arrival makes this bot unnecessary. Replace it with the late human
+      // at the clean match boundary, including the solo Host-vs-Bot case. This
+      // turns Host + 1 student into Host vs Student instead of Student vs Bot.
+      room.players.delete(botId);
+      room.hostParticipating = humanId === room.hostId ? true : room.hostParticipating;
+      room.hostExitAfterMatch = false;
+      const nextMatch = makeMatch(court.index, humanId, latePlayerId, 'ready');
+      court.activeMatch = nextMatch;
+      scheduleMatchStart(room, court, nextMatch);
       broadcastRoom(room);
       return;
     }
@@ -4725,6 +4728,37 @@ wss.on('connection', (ws) => {
         if (room.phase !== 'lobby') throw new Error('Turn timing can only be changed in the lobby.');
         room.turnSeconds = clampTurnSeconds(Number(msg.seconds));
         broadcastRoom(room);
+        return;
+      }
+
+      if (msg.type === 'host-logout') {
+        const result = requireHost(ws);
+        if (!result) return;
+        const { room, ctx } = result;
+        if (room.phase !== 'lobby') throw new Error('Return to the lobby before logging out as host.');
+
+        // Close the hosted lobby cleanly and detach every browser from the room.
+        // Keep each WebSocket itself open so the same device can immediately host
+        // or join another room without triggering the duplicate-device guard.
+        for (const player of room.players.values()) {
+          if (player.isBot) continue;
+          const playerSocket = socketsByPlayer.get(player.id);
+          if (!playerSocket) continue;
+          clearSpectatorSubscription(playerSocket);
+          socketsByPlayer.delete(player.id);
+          const playerCtx = contexts.get(playerSocket);
+          if (playerCtx) {
+            playerCtx.roomCode = undefined;
+            playerCtx.playerId = undefined;
+            playerCtx.spectatingMatchId = undefined;
+            playerCtx.spectatingPlayerId = undefined;
+          }
+          send(playerSocket, {
+            type: 'logged-out',
+            message: player.id === ctx.playerId ? 'Logged out. You can now host or join another room.' : 'The host closed this lobby. You can join another room.',
+          });
+        }
+        rooms.delete(room.code);
         return;
       }
 
