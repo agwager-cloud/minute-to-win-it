@@ -286,9 +286,9 @@ class PrecisionController{
         <div class="parry-tell" id="parry-tell"><span>READ THE WIND-UP</span><div class="parry-tell-track"><div id="parry-tell-fill"></div></div></div>
       </div>
       <div class="parry-controls">
-        <div id="parry-message" class="parry-message">WATCH THE OPPONENT</div>
-        <button id="parry-pad" class="parry-pad">PARRY<small>Tap only when the real strike flashes</small></button>
-        <div class="parry-tip"><span class="real">⚡ REAL STRIKE → TAP</span><span class="feint">↩ FEINT → DO NOTHING</span></div>
+        <div id="parry-message" class="parry-message">WATCH THE SWORD</div>
+        <button id="parry-pad" class="parry-pad">PARRY<small>Read the sword — decide for yourself</small></button>
+        <div class="parry-tip"><span class="neutral">WATCH THE SWORD • PARRY ONLY IF THE ATTACK COMMITS</span></div>
         <div id="parry-history" class="parry-history"></div>
       </div>
     </div>`;
@@ -302,15 +302,15 @@ class PrecisionController{
       const telegraphMs=Math.round(650+seededUnit(this.state.seed,330+encounter)*650);
       const windowMs=Math.max(650,Math.round(850-encounter*22));
       roundEl.textContent=String(encounter+1);arena.className=`parry-arena windup ${side}`;opponent.className=`parry-opponent windup ${side}`;weapon.className='parry-weapon';
-      msg.textContent=encounter<2?'WATCH… WAIT FOR THE STRIKE':'WATCH THE WIND-UP';pad.className='parry-pad';pad.innerHTML='PARRY<small>Do not anticipate</small>';tellFill.style.transition='none';tellFill.style.width='100%';void tellFill.offsetWidth;tellFill.style.transition=`width ${telegraphMs}ms linear`;tellFill.style.width='0%';phase='telegraph';
+      msg.textContent='WATCH THE SWORD';pad.className='parry-pad';pad.innerHTML='PARRY<small>Read the sword — decide for yourself</small>';tellFill.style.transition='none';tellFill.style.width='100%';void tellFill.offsetWidth;tellFill.style.transition=`width ${telegraphMs}ms linear`;tellFill.style.width='0%';phase='telegraph';
       const actionPromise=new Promise<ParryAction>(resolve=>resolveAction=resolve);
       const telegraphTimer=window.setTimeout(()=>{
         if(this.destroyed||phase!=='telegraph')return;
         if(isFeint){
-          phase='feint';arena.className=`parry-arena feint ${side}`;opponent.className=`parry-opponent feint ${side}`;weapon.className='parry-weapon feint';msg.innerHTML='FEINT!<small>Hold your nerve — do not tap</small>';pad.className='parry-pad';pad.innerHTML='DO NOT PARRY<small>Any tap during the feint scores 0</small>';sound.beep(330,.045);
+          phase='feint';arena.className=`parry-arena decision ${side}`;opponent.className=`parry-opponent feint ${side}`;weapon.className='parry-weapon feint';msg.innerHTML='READ THE SWORD<small>Make your decision from the weapon movement</small>';pad.className='parry-pad decision';pad.innerHTML='PARRY<small>Tap only if the attack commits</small>';
           const feintTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='feint')return;phase='locked';resolveAction({kind:'feint-safe'});},950);this.timers.push(feintTimer);return;
         }
-        phase='strike';strikeAt=performance.now();arena.className=`parry-arena strike ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.textContent='STRIKE!';pad.className='parry-pad active';pad.innerHTML=`PARRY NOW!<small>React within ${(windowMs/1000).toFixed(2)} s</small>`;sound.beep(680,.04);
+        phase='strike';strikeAt=performance.now();arena.className=`parry-arena decision ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.innerHTML='READ THE SWORD<small>Make your decision from the weapon movement</small>';pad.className='parry-pad decision';pad.innerHTML='PARRY<small>Tap only if the attack commits</small>';
         const missTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='strike')return;phase='locked';resolveAction({kind:'miss'});},windowMs);this.timers.push(missTimer);
       },telegraphMs);this.timers.push(telegraphTimer);
       const action=await actionPromise;if(this.destroyed)return;
@@ -320,7 +320,7 @@ class PrecisionController{
       }else if(action.kind==='early'){
         mistake=true;if(isFeint){feedback='FOOLED BY THE FEINT';detail='Any tap during a feint is a false parry';arena.className=`parry-arena feint failed ${side}`;weapon.className='parry-weapon feint';}else{feedback='TOO EARLY';detail='Wait for the strike flash';arena.className=`parry-arena failed ${side}`;}pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>Anticipation was punished</small>';tieBreakPenalty+=2000;
       }else if(action.kind==='miss'){
-        mistake=true;feedback='TOO LATE';detail='The strike got through';arena.className=`parry-arena failed ${side}`;pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>React when STRIKE appears</small>';tieBreakPenalty+=2000;sound.beep(190,.11);
+        mistake=true;feedback='TOO LATE';detail='The strike got through';arena.className=`parry-arena failed ${side}`;pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>The committed strike got through</small>';tieBreakPenalty+=2000;sound.beep(190,.11);
       }else{
         const rt=Math.round(action.reaction||0);const reactionFloor=180;const reactionSpan=Math.max(1,windowMs-reactionFloor);const timing=Math.max(0,Math.min(1,(rt-reactionFloor)/reactionSpan));earned=Math.max(40,Math.min(100,Math.round(100-60*timing)));tieBreakPenalty+=rt;feedback=earned>=96?'PERFECT PARRY!':earned>=86?'GREAT PARRY!':earned>=72?'GOOD PARRY!':earned>=55?'PARRY!':'LATE PARRY!';detail=`${rt} ms reaction`;arena.className=`parry-arena success ${side}`;opponent.className=`parry-opponent blocked ${side}`;pad.className='parry-pad success';pad.innerHTML=`${earned} POINTS<small>${rt} ms reaction · still blocked</small>`;
       }
