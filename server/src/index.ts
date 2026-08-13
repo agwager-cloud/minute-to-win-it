@@ -3485,7 +3485,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace' || gameId === 'ricochet' || gameId === 'knife-wheel';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace' || gameId === 'ricochet' || gameId === 'knife-wheel' || gameId === 'conveyor-chef';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3579,7 +3579,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   }
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet' || state.gameId === 'knife-wheel';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet' || state.gameId === 'knife-wheel' || state.gameId === 'conveyor-chef';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3659,6 +3659,12 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Knife Wheel throw scores.');
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Knife Wheel total does not match throw scores.');
+  }
+  if (state.gameId === 'conveyor-chef') {
+    if (score > 1000 || secondary > 20000) throw new Error('Invalid Conveyor Chef score.');
+    if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Conveyor Chef cut scores.');
+    const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
+    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Conveyor Chef total does not match cut scores.');
   }
   state.results[playerId] = {
     score,
@@ -3857,6 +3863,29 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 70000);
   }
 
+  // Conveyor Chef gives every ingredient a short self-advancing cut window.
+  // This watchdog covers suspended/throttled mobile tabs so a player can never
+  // leave their opponent waiting indefinitely on the kitchen line.
+  if (room.selectedGameId === 'conveyor-chef') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'conveyor-chef') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 0,
+            secondary: 20000,
+            display: '0 / 1000 pts · server timeout',
+            rounds: Array.from({ length: 10 }, () => 0),
+          });
+        } catch { /* match may have resolved while watchdog was running */ }
+      }
+    }, 52000);
+  }
+
   // Parry is also completely self-advancing, but a suspended browser can
   // throttle JavaScript timers. Force any missing result after 42 seconds so
   // no student can hold a court by backgrounding the tab or refusing input.
@@ -3882,7 +3911,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : room.selectedGameId === 'ricochet' ? 7200 : room.selectedGameId === 'knife-wheel' ? 18500 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : room.selectedGameId === 'ricochet' ? 7200 : room.selectedGameId === 'knife-wheel' ? 18500 : room.selectedGameId === 'conveyor-chef' ? 17500 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3995,6 +4024,24 @@ function startPrecision(room: Room, court: Court, match: Match) {
           score,
           secondary,
           display: `${score} / 1000 pts · ${hits}/10 knives`,
+          rounds,
+        });
+      } else if (room.selectedGameId === 'conveyor-chef') {
+        const rounds: number[] = [];
+        for (let i = 0; i < 10; i++) {
+          const rushPenalty = i * 1.2;
+          const miss = Math.random() < (0.035 + i * 0.006);
+          if (miss) rounds.push(Math.round(18 + Math.random() * 30));
+          else rounds.push(Math.max(52, Math.min(100, Math.round(78 - rushPenalty + Math.random() * 23))));
+        }
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const estimatedErrors = rounds.map((value) => value <= 0 ? 1000 : Math.max(8, Math.round((100 - value) * 4.4 + 18)));
+        const secondary = Math.min(20000, estimatedErrors.reduce((total, value) => total + value, 0));
+        const avgError = Math.round(secondary / 10);
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary,
+          display: `${score} / 1000 pts · ${avgError} ms avg error`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
