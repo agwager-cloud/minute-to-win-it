@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='drift-line')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -156,7 +156,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='drift-line')void this.runDriftLine();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -509,6 +509,60 @@ class PrecisionController{
       msg.innerHTML=`${feedback}<small>${detail}</small>`;history.innerHTML=points.map((value,i)=>`<span class="${value>=84?'great':value>=45?'okay':'miss'}"><b>${i+1}</b>${value}</span>`).join('');this.sendProgress(round+1,feedback,total);await sleep(1050);phase='idle';
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)} avg miss`,points);
+  }
+  async runDriftLine(){
+    const stage=this.stage();if(!stage)return;
+    const durationMs=20000,segments=10,segmentMs=durationMs/segments,bandHalf=.22;
+    const segmentInside=Array.from({length:segments},()=>0),segmentTotal=Array.from({length:segments},()=>0);let deviationWeighted=0,totalSampleMs=0;
+    stage.innerHTML=`<div class="drift-game">
+      <div class="drift-topline"><div class="trial-label">SECTOR <span id="drift-sector">1</span> / ${segments}</div><div class="drift-score">SCORE <strong id="drift-score">0</strong><small>/ 1000</small></div></div>
+      <div class="drift-arena" id="drift-arena">
+        <div class="drift-speed-lines"></div>
+        <div class="drift-road"><span class="drift-edge left"></span><span class="drift-edge right"></span><div class="drift-centre-line"></div></div>
+        <div class="drift-gauge-label left">LEFT DRIFT</div><div class="drift-gauge-label right">RIGHT DRIFT</div>
+        <div class="drift-band" id="drift-band"><span>PERFECT LINE</span></div>
+        <div class="drift-car" id="drift-car"><span>🏎️</span><i></i></div>
+        <div class="drift-zero"></div>
+      </div>
+      <div class="drift-controls">
+        <div class="drift-status-card"><small>CONTROL</small><strong id="drift-status">GET READY</strong><em id="drift-stat">Keep the car inside green</em></div>
+        <div class="drift-buttons"><button id="drift-left" class="drift-button left">◀ LEFT<small>Hold to correct</small></button><button id="drift-right" class="drift-button right">RIGHT ▶<small>Hold to correct</small></button></div>
+        <div class="drift-progress"><div id="drift-progress-fill"></div><span id="drift-time">20.0 s</span></div>
+        <div id="drift-history" class="drift-history"></div>
+      </div>
+    </div>`;
+    const sectorEl=document.querySelector<HTMLElement>('#drift-sector')!,scoreEl=document.querySelector<HTMLElement>('#drift-score')!,arena=document.querySelector<HTMLElement>('#drift-arena')!,band=document.querySelector<HTMLElement>('#drift-band')!,car=document.querySelector<HTMLElement>('#drift-car')!,status=document.querySelector<HTMLElement>('#drift-status')!,stat=document.querySelector<HTMLElement>('#drift-stat')!,left=document.querySelector<HTMLButtonElement>('#drift-left')!,right=document.querySelector<HTMLButtonElement>('#drift-right')!,progress=document.querySelector<HTMLElement>('#drift-progress-fill')!,timeEl=document.querySelector<HTMLElement>('#drift-time')!,history=document.querySelector<HTMLElement>('#drift-history')!;
+    let leftDown=false,rightDown=false,running=false,position=0,velocity=0,lastNow=0,started=0,lastSector=-1,lastProgressSent=0;
+    const setButton=(button:HTMLButtonElement,side:'left'|'right',down:boolean)=>{if(side==='left')leftDown=down;else rightDown=down;button.classList.toggle('held',down);};
+    const bindHold=(button:HTMLButtonElement,side:'left'|'right')=>{button.addEventListener('pointerdown',e=>{e.preventDefault();if(!running)return;try{button.setPointerCapture(e.pointerId)}catch{}setButton(button,side,true);sound.beep(side==='left'?430:520,.025)});const release=(e:PointerEvent)=>{e.preventDefault();setButton(button,side,false)};button.addEventListener('pointerup',release);button.addEventListener('pointercancel',release);button.addEventListener('lostpointercapture',()=>setButton(button,side,false));};
+    bindHold(left,'left');bindHold(right,'right');
+    const phase1=seededUnit(this.state.seed,1100)*Math.PI*2,phase2=seededUnit(this.state.seed,1101)*Math.PI*2,phase3=seededUnit(this.state.seed,1102)*Math.PI*2;
+    const freq1=.54+seededUnit(this.state.seed,1110)*.16,freq2=.22+seededUnit(this.state.seed,1111)*.10;
+    const targetAt=(t:number)=>Math.max(-.54,Math.min(.54,.34*Math.sin(t*freq1+phase1)+.16*Math.sin(t*freq2+phase2)));
+    const windAt=(t:number)=>.23*Math.sin(t*1.13+phase3)+.10*Math.sin(t*.47+phase1*.7);
+    const initialTarget=targetAt(0);band.style.left=`${50+initialTarget*42}%`;band.style.width=`${bandHalf*84}%`;car.style.left=`${50+initialTarget*42}%`;
+    for(const n of [3,2,1]){status.textContent=String(n);stat.textContent='Drift run starts automatically';sound.beep(360+n*80,.05);await sleep(700);if(this.destroyed)return;}
+    status.textContent='GO!';stat.textContent='Use tiny LEFT / RIGHT corrections';sound.beep(850,.07);await sleep(180);if(this.destroyed)return;
+    running=true;started=performance.now();lastNow=started;position=targetAt(0);velocity=0;
+    await new Promise<void>(resolve=>{
+      const tick=(now:number)=>{if(this.destroyed){resolve();return;}const elapsed=Math.min(durationMs,now-started),t=elapsed/1000,dt=Math.min(.05,Math.max(.001,(now-lastNow)/1000));lastNow=now;
+        const control=(rightDown?1:0)-(leftDown?1:0),target=targetAt(t),wind=windAt(t);
+        velocity+=(control*1.72+wind-velocity*2.15)*dt;position+=velocity*dt;
+        if(position>1){position=1;velocity=Math.min(0,velocity)*.35}else if(position<-1){position=-1;velocity=Math.max(0,velocity)*.35}
+        const dist=Math.abs(position-target),inside=dist<=bandHalf,sector=Math.min(segments-1,Math.floor(elapsed/segmentMs));
+        const sampleMs=dt*1000;segmentTotal[sector]+=sampleMs;if(inside)segmentInside[sector]+=sampleMs;deviationWeighted+=dist*sampleMs;totalSampleMs+=sampleMs;
+        const targetPct=50+target*42,carPct=50+position*42,bandWidthPct=bandHalf*84;
+        band.style.left=`${targetPct}%`;band.style.width=`${bandWidthPct}%`;car.style.left=`${carPct}%`;car.style.transform=`translate(-50%,-50%) rotate(${Math.max(-22,Math.min(22,velocity*22))}deg)`;
+        arena.classList.toggle('on-line',inside);arena.classList.toggle('off-line',!inside);status.textContent=inside?'ON THE LINE':position<target?'CORRECT RIGHT':'CORRECT LEFT';status.className=inside?'good':'warn';
+        const insideTotal=segmentInside.reduce((a,b)=>a+b,0),pct=elapsed>0?insideTotal/elapsed*100:100;stat.textContent=`${pct.toFixed(0)}% of run inside green`;progress.style.width=`${Math.max(0,100-elapsed/durationMs*100)}%`;timeEl.textContent=`${Math.max(0,(durationMs-elapsed)/1000).toFixed(1)} s`;
+        if(sector!==lastSector){lastSector=sector;sectorEl.textContent=String(sector+1)}
+        const completed=Math.min(segments,Math.floor(elapsed/segmentMs));const scores=Array.from({length:completed},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentInside[i]/Math.max(1,segmentTotal[i]))))));const liveScore=scores.reduce((a,b)=>a+b,0);scoreEl.textContent=String(liveScore);history.innerHTML=scores.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');if(completed>lastProgressSent){lastProgressSent=completed;this.sendProgress(completed,`SECTOR ${completed} · ${scores[completed-1]} PTS`,liveScore);}
+        if(elapsed>=durationMs){running=false;leftDown=false;rightDown=false;left.classList.remove('held');right.classList.remove('held');resolve();return;}this.raf=requestAnimationFrame(tick);
+      };this.raf=requestAnimationFrame(tick);
+    });
+    if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
+    const rounds=Array.from({length:segments},(_,i)=>Math.max(0,Math.min(100,Math.round(100*(segmentInside[i]/Math.max(1,segmentTotal[i]))))));const score=rounds.reduce((a,b)=>a+b,0),insidePct=score/10,avgDev=totalSampleMs?deviationWeighted/totalSampleMs:2,secondary=Math.round(avgDev*10000);
+    scoreEl.textContent=String(score);history.innerHTML=rounds.map((v,i)=>`<span class="${v>=82?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');status.textContent=score>=850?'DRIFT MASTER!':score>=700?'GREAT CONTROL!':score>=520?'SOLID RUN':'RUN COMPLETE';status.className=score>=700?'good':'warn';stat.textContent=`${insidePct.toFixed(1)}% in the perfect line`;progress.style.width='0%';timeEl.textContent='FINISH';sound.beep(score>=850?980:score>=650?720:430,.1);this.sendProgress(10,'RUN COMPLETE',score);await sleep(850);if(this.destroyed)return;this.sendResult(score,secondary,`${score} / 1000 pts · ${insidePct.toFixed(1)}% in line`,rounds);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
