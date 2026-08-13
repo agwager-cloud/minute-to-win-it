@@ -273,8 +273,8 @@ class PrecisionController{
     </div>`;
     const roundEl=document.querySelector<HTMLElement>('#parry-round')!,scoreEl=document.querySelector<HTMLElement>('#parry-score')!,arena=document.querySelector<HTMLElement>('#parry-arena')!,opponent=document.querySelector<HTMLElement>('#parry-opponent')!,weapon=document.querySelector<HTMLElement>('#parry-weapon')!,tellFill=document.querySelector<HTMLElement>('#parry-tell-fill')!,msg=document.querySelector<HTMLElement>('#parry-message')!,pad=document.querySelector<HTMLButtonElement>('#parry-pad')!,history=document.querySelector<HTMLElement>('#parry-history')!;
     type ParryAction={kind:'early'|'parry'|'miss'|'feint-safe';reaction?:number};
-    let phase:'idle'|'telegraph'|'strike'|'locked'='idle',strikeAt=0,resolveAction:(v:ParryAction)=>void=()=>{};
-    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='telegraph'){phase='locked';resolveAction({kind:'early'});sound.beep(170,.12);return;}if(phase==='strike'){phase='locked';resolveAction({kind:'parry',reaction:Math.max(0,performance.now()-strikeAt)});sound.beep(920,.055);}});
+    let phase:'idle'|'telegraph'|'feint'|'strike'|'locked'='idle',strikeAt=0,resolveAction:(v:ParryAction)=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='telegraph'||phase==='feint'){phase='locked';resolveAction({kind:'early'});sound.beep(170,.12);return;}if(phase==='strike'){phase='locked';resolveAction({kind:'parry',reaction:Math.max(0,performance.now()-strikeAt)});sound.beep(920,.055);}});
     await sleep(650);
     for(let encounter=0;encounter<rounds&&!this.destroyed;encounter++){
       const isFeint=feints.has(encounter),side=seededUnit(this.state.seed,310+encounter)>.5?'right':'left';
@@ -285,7 +285,10 @@ class PrecisionController{
       const actionPromise=new Promise<ParryAction>(resolve=>resolveAction=resolve);
       const telegraphTimer=window.setTimeout(()=>{
         if(this.destroyed||phase!=='telegraph')return;
-        if(isFeint){phase='locked';resolveAction({kind:'feint-safe'});return;}
+        if(isFeint){
+          phase='feint';arena.className=`parry-arena feint ${side}`;opponent.className=`parry-opponent feint ${side}`;weapon.className='parry-weapon feint';msg.innerHTML='FEINT!<small>Hold your nerve — do not tap</small>';pad.className='parry-pad';pad.innerHTML='DO NOT PARRY<small>Any tap during the feint scores 0</small>';sound.beep(330,.045);
+          const feintTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='feint')return;phase='locked';resolveAction({kind:'feint-safe'});},950);this.timers.push(feintTimer);return;
+        }
         phase='strike';strikeAt=performance.now();arena.className=`parry-arena strike ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.textContent='STRIKE!';pad.className='parry-pad active';pad.innerHTML=`PARRY NOW!<small>React within ${(windowMs/1000).toFixed(2)} s</small>`;sound.beep(680,.04);
         const missTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='strike')return;phase='locked';resolveAction({kind:'miss'});},windowMs);this.timers.push(missTimer);
       },telegraphMs);this.timers.push(telegraphTimer);
@@ -294,7 +297,7 @@ class PrecisionController{
       if(action.kind==='feint-safe'){
         earned=100;feedback='FEINT READ!';detail='You held your nerve';arena.className=`parry-arena feint ${side}`;opponent.className=`parry-opponent feint ${side}`;weapon.className='parry-weapon feint';pad.className='parry-pad success';pad.innerHTML='100 POINTS<small>Correct — do not parry a feint</small>';sound.beep(820,.07);
       }else if(action.kind==='early'){
-        mistake=true;if(isFeint){feedback='FOOLED BY THE FEINT';detail='You parried an attack that never came';arena.className=`parry-arena feint failed ${side}`;weapon.className='parry-weapon feint';}else{feedback='TOO EARLY';detail='Wait for the strike flash';arena.className=`parry-arena failed ${side}`;}pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>Anticipation was punished</small>';tieBreakPenalty+=2000;
+        mistake=true;if(isFeint){feedback='FOOLED BY THE FEINT';detail='Any tap during a feint is a false parry';arena.className=`parry-arena feint failed ${side}`;weapon.className='parry-weapon feint';}else{feedback='TOO EARLY';detail='Wait for the strike flash';arena.className=`parry-arena failed ${side}`;}pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>Anticipation was punished</small>';tieBreakPenalty+=2000;
       }else if(action.kind==='miss'){
         mistake=true;feedback='TOO LATE';detail='The strike got through';arena.className=`parry-arena failed ${side}`;pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>React when STRIKE appears</small>';tieBreakPenalty+=2000;sound.beep(190,.11);
       }else{
