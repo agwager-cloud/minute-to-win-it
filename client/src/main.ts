@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop'||gameId==='blind-beat')return `${(value/1000).toFixed(2)} s drift`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -152,7 +152,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -308,6 +308,64 @@ class PrecisionController{
       this.sendProgress(encounter+1,feedback,total);await sleep(780);phase='idle';
     }
     if(this.destroyed)return;const errors=mistakes.filter(Boolean).length;this.sendResult(total,tieBreakPenalty,`${total} / ${maxScore} pts · ${errors} mistake${errors===1?'':'s'}`,points);
+  }
+  async runBlindBeat(){
+    const stage=this.stage();if(!stage)return;
+    const bpm=Math.round(92+seededUnit(this.state.seed,500)*26),interval=60000/bpm,visibleBeats=16,blindBeats=16;
+    const missPenalty=Math.round(interval*.78),extraPenalty=Math.round(interval*.72);
+    const blindErrors=Array<number|undefined>(blindBeats).fill(undefined);let extraTaps=0,blindTapCount=0,phase:'countdown'|'visible'|'blind'|'done'='countdown';
+    let firstVisibleAt=0,firstBlindAt=0;
+    stage.innerHTML=`<div class="beat-game">
+      <div class="beat-topline"><div class="trial-label">BLIND BEAT <span id="beat-phase-label">GET READY</span></div><div class="beat-tempo">TEMPO <strong>${bpm}</strong><small>BPM</small></div></div>
+      <div class="beat-arena" id="beat-arena">
+        <div class="beat-mode" id="beat-mode">VISIBLE METRONOME</div>
+        <div class="beat-orbit"><div id="beat-pulse" class="beat-pulse">●</div><div id="beat-blind-symbol" class="beat-blind-symbol">?</div></div>
+        <div class="beat-dots" id="beat-dots">${Array.from({length:4},(_,i)=>`<span data-beat-dot="${i}">${i+1}</span>`).join('')}</div>
+        <div class="beat-bar-label" id="beat-bar-label">4 visible bars → 4 blind bars</div>
+      </div>
+      <div class="beat-controls">
+        <div id="beat-message" class="beat-message">LOCK ONTO THE PULSE</div>
+        <button id="beat-pad" class="beat-pad">TAP<small>Tap with every beat</small></button>
+        <div class="beat-guide"><span class="visible">👁 4 BARS WITH CUE</span><span class="blind">🌑 4 BARS BLIND</span></div>
+        <div class="beat-bars" id="beat-bars">${Array.from({length:8},(_,i)=>`<span data-bar="${i}" class="${i<4?'visible':'blind'}"></span>`).join('')}</div>
+        <div id="beat-tap-count" class="beat-tap-count">FOLLOW THE FIRST 16 BEATS</div>
+      </div>
+    </div>`;
+    const arena=document.querySelector<HTMLElement>('#beat-arena')!,modeEl=document.querySelector<HTMLElement>('#beat-mode')!,pulse=document.querySelector<HTMLElement>('#beat-pulse')!,blindSymbol=document.querySelector<HTMLElement>('#beat-blind-symbol')!,barLabel=document.querySelector<HTMLElement>('#beat-bar-label')!,phaseLabel=document.querySelector<HTMLElement>('#beat-phase-label')!,msg=document.querySelector<HTMLElement>('#beat-message')!,pad=document.querySelector<HTMLButtonElement>('#beat-pad')!,tapCount=document.querySelector<HTMLElement>('#beat-tap-count')!;
+    const dots=[...document.querySelectorAll<HTMLElement>('[data-beat-dot]')],bars=[...document.querySelectorAll<HTMLElement>('[data-bar]')];
+    const waitUntil=(target:number)=>new Promise<void>(resolve=>{const tick=()=>{if(this.destroyed||performance.now()>=target){resolve();return;}this.raf=requestAnimationFrame(tick)};tick()});
+    const flashTap=()=>{pad.classList.add('pressed');const id=window.setTimeout(()=>pad.classList.remove('pressed'),85);this.timers.push(id)};
+    pad.addEventListener('pointerdown',e=>{
+      e.preventDefault();if(phase==='countdown'||phase==='done')return;flashTap();sound.beep(phase==='visible'?520:430,.025);
+      if(phase==='visible')return;
+      blindTapCount++;tapCount.textContent=`BLIND TAPS ${blindTapCount}`;const now=performance.now(),raw=(now-firstBlindAt)/interval,index=Math.round(raw);
+      if(index<0||index>=blindBeats){extraTaps++;return;}
+      const expected=firstBlindAt+index*interval,error=Math.abs(now-expected);
+      if(blindErrors[index]===undefined&&error<=interval*.49){blindErrors[index]=Math.round(error);}else extraTaps++;
+    });
+    for(const n of [3,2,1]){if(this.destroyed)return;phaseLabel.textContent='GET READY';msg.textContent=`STARTING IN ${n}`;pad.innerHTML=`${n}<small>Then tap with every pulse</small>`;sound.beep(360+n*90,.045);await sleep(700)}
+    if(this.destroyed)return;
+    phase='visible';arena.className='beat-arena visible-phase';modeEl.textContent='VISIBLE METRONOME';phaseLabel.textContent='VISIBLE · 4 BARS';msg.textContent='TAP WITH THE PULSE';pad.innerHTML='TAP<small>Follow the visible beat</small>';barLabel.textContent='Watch, listen and tap · rhythm will disappear';firstVisibleAt=performance.now()+360;
+    for(let beat=0;beat<visibleBeats&&!this.destroyed;beat++){
+      const expected=firstVisibleAt+beat*interval;await waitUntil(expected);if(this.destroyed)return;
+      const dot=beat%4,bar=Math.floor(beat/4);dots.forEach((el,i)=>el.classList.toggle('active',i===dot));bars.forEach((el,i)=>el.classList.toggle('current',i===bar));
+      pulse.classList.remove('hit');void pulse.offsetWidth;pulse.classList.add('hit');sound.beep(dot===0?760:610,.035);
+      phaseLabel.textContent=`VISIBLE · BAR ${bar+1}/4`;tapCount.textContent=`FOLLOW THE BEAT · ${beat+1} / ${visibleBeats}`;
+      const clearId=window.setTimeout(()=>pulse.classList.remove('hit'),Math.min(150,interval*.25));this.timers.push(clearId);
+      if(beat===visibleBeats-1){firstBlindAt=firstVisibleAt+visibleBeats*interval;}
+    }
+    if(this.destroyed)return;
+    phase='blind';arena.className='beat-arena blind-phase';modeEl.textContent='BLIND MODE';phaseLabel.textContent='BLIND · 4 BARS';msg.textContent='KEEP THE BEAT';pad.innerHTML='TAP<small>No cue now — trust your rhythm</small>';barLabel.textContent='The metronome is hidden · keep the same tempo';pulse.classList.remove('hit');pulse.style.visibility='hidden';blindSymbol.classList.add('show');dots.forEach(el=>el.classList.remove('active'));bars.forEach((el,i)=>{el.classList.remove('current');if(i<4)el.classList.add('complete')});tapCount.textContent='BLIND TAPS 0';this.sendProgress(4,'CUE HIDDEN');
+    for(let beat=0;beat<blindBeats&&!this.destroyed;beat++){
+      const expected=firstBlindAt+beat*interval;await waitUntil(expected);if(this.destroyed)return;
+      // Deliberately do not alter any on-screen element here. Even a bar marker
+      // changing every four beats would leak the hidden tempo back to the player.
+      if(beat%4===3){const bar=Math.floor(beat/4);this.sendProgress(5+bar,`BLIND BAR ${bar+1}`);}
+    }
+    await waitUntil(firstBlindAt+(blindBeats-1)*interval+interval*.55);if(this.destroyed)return;phase='done';
+    const finalErrors=blindErrors.map(v=>v===undefined?missPenalty:v),misses=blindErrors.filter(v=>v===undefined).length,totalDrift=finalErrors.reduce((a,b)=>a+b,0)+Math.min(extraTaps,16)*extraPenalty,worst=Math.max(...finalErrors,extraTaps?extraPenalty:0);
+    bars.forEach(el=>{el.classList.remove('current');el.classList.add('complete')});arena.className='beat-arena finished';blindSymbol.textContent='✓';msg.textContent='RHYTHM COMPLETE';pad.className='beat-pad finished';pad.innerHTML=`${(totalDrift/1000).toFixed(2)} s DRIFT<small>${misses} missed · ${extraTaps} extra tap${extraTaps===1?'':'s'}</small>`;tapCount.textContent='LOWEST TOTAL DRIFT WINS';
+    this.sendProgress(8,'FINISHED',totalDrift);await sleep(950);if(this.destroyed)return;this.sendResult(totalDrift,worst,`${(totalDrift/1000).toFixed(2)} s drift · ${misses} miss${misses===1?'':'es'}${extraTaps?` · ${extraTaps} extra`:''}`,finalErrors);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
