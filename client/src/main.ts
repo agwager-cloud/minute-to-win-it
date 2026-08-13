@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='shrink-ring')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -152,7 +152,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -249,18 +249,77 @@ class PrecisionController{
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),hits=hitFlags.filter(Boolean).length;this.sendResult(total,Math.round(totalError*100),`${total} / 300 pts · ${hits}/3 hits`,points);
   }
-  async runTimeStop(){
-    const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const stage=this.stage();if(!stage)return;
-    stage.innerHTML=`<div class="time-game"><div class="trial-label">TARGET <span id="time-round">1</span> / 3</div><div class="target-box"><small>STOP AT</small><strong id="target-time">${targets[0].toFixed(2)}</strong><em>SECONDS</em></div><div id="clock-display" class="clock-display">READY</div><button id="time-pad" class="time-pad">READY<small>Tap to begin the round</small></button><div id="time-history" class="reaction-history"></div></div>`;
-    const roundEl=document.querySelector<HTMLElement>('#time-round')!,targetEl=document.querySelector<HTMLElement>('#target-time')!,clock=document.querySelector<HTMLElement>('#clock-display')!,pad=document.querySelector<HTMLButtonElement>('#time-pad')!,history=document.querySelector<HTMLElement>('#time-history')!;
-    let phase:'ready'|'countdown'|'running'|'locked'='ready',startAt=0,resolveStop:(v:number)=>void=()=>{};
-    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='ready'){phase='countdown';void beginCountdown();}else if(phase==='running'){phase='locked';resolveStop(performance.now()-startAt);sound.beep(760,.07)}});
-    const beginCountdown=async()=>{for(const n of [3,2,1]){clock.textContent=String(n);pad.innerHTML=`${n}<small>Get ready</small>`;sound.beep(360+n*80,.05);await sleep(600);if(this.destroyed)return;}clock.textContent='0.00';pad.innerHTML='STOP<small>Tap when you reach the target</small>';pad.classList.add('stop');startAt=performance.now();phase='running';const animate=()=>{if(this.destroyed||phase!=='running')return;const e=performance.now()-startAt;clock.textContent=e<1000?(e/1000).toFixed(2):'?.??';this.raf=requestAnimationFrame(animate)};animate();};
-    for(let i=0;i<3&&!this.destroyed;i++){
-      roundEl.textContent=String(i+1);targetEl.textContent=targets[i].toFixed(2);clock.textContent='READY';pad.classList.remove('stop');pad.innerHTML='READY<small>Tap to begin the round</small>';phase='ready';
-      const elapsedMs=await new Promise<number>(r=>resolveStop=r);if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);const measured=Math.round((elapsedMs/1000)*100)/100;const err=Math.round(Math.abs(measured-targets[i])*1000);errors.push(err);clock.textContent=`${measured.toFixed(2)} s`;pad.classList.remove('stop');pad.innerHTML=`ERROR ${(err/1000).toFixed(2)} s<small>Target ${targets[i].toFixed(2)} s</small>`;history.innerHTML=errors.map((v,j)=>`<span>${j+1}: +${(v/1000).toFixed(2)} s</span>`).join('');this.sendProgress(i+1,'TIMING ERROR',err);sound.beep(err<=30?900:err<=100?650:420,.08);await sleep(1200);
+  async runParry(){
+    const stage=this.stage();if(!stage)return;
+    const rounds=10,maxScore=1000,points:number[]=[],mistakes:boolean[]=[];let total=0,tieBreakPenalty=0;
+    // The opening two encounters are always genuine attacks so new players learn
+    // the visual language before feints are introduced. Three of encounters 3–10
+    // are then chosen deterministically from the shared match seed as feints.
+    const feintCandidates=Array.from({length:8},(_,i)=>i+2).sort((a,b)=>seededUnit(this.state.seed,200+a)-seededUnit(this.state.seed,200+b));
+    const feints=new Set(feintCandidates.slice(0,3));
+    stage.innerHTML=`<div class="parry-game">
+      <div class="parry-topline"><div class="trial-label">ENCOUNTER <span id="parry-round">1</span> / ${rounds}</div><div class="parry-score">SCORE <strong id="parry-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="parry-arena" id="parry-arena">
+        <div class="parry-danger-glow"></div>
+        <div class="parry-opponent" id="parry-opponent"><div class="parry-body">🥷</div><div class="parry-weapon" id="parry-weapon">⚔️</div></div>
+        <div class="parry-tell" id="parry-tell"><span>READ THE WIND-UP</span><div class="parry-tell-track"><div id="parry-tell-fill"></div></div></div>
+      </div>
+      <div class="parry-controls">
+        <div id="parry-message" class="parry-message">WATCH THE OPPONENT</div>
+        <button id="parry-pad" class="parry-pad">PARRY<small>Tap only when the real strike flashes</small></button>
+        <div class="parry-tip"><span class="real">⚡ REAL STRIKE → TAP</span><span class="feint">↩ FEINT → DO NOTHING</span></div>
+        <div id="parry-history" class="parry-history"></div>
+      </div>
+    </div>`;
+    const roundEl=document.querySelector<HTMLElement>('#parry-round')!,scoreEl=document.querySelector<HTMLElement>('#parry-score')!,arena=document.querySelector<HTMLElement>('#parry-arena')!,opponent=document.querySelector<HTMLElement>('#parry-opponent')!,weapon=document.querySelector<HTMLElement>('#parry-weapon')!,tellFill=document.querySelector<HTMLElement>('#parry-tell-fill')!,msg=document.querySelector<HTMLElement>('#parry-message')!,pad=document.querySelector<HTMLButtonElement>('#parry-pad')!,history=document.querySelector<HTMLElement>('#parry-history')!;
+    type ParryAction={kind:'early'|'parry'|'miss'|'feint-safe';reaction?:number};
+    let phase:'idle'|'telegraph'|'strike'|'locked'='idle',strikeAt=0,resolveAction:(v:ParryAction)=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase==='telegraph'){phase='locked';resolveAction({kind:'early'});sound.beep(170,.12);return;}if(phase==='strike'){phase='locked';resolveAction({kind:'parry',reaction:Math.max(0,performance.now()-strikeAt)});sound.beep(920,.055);}});
+    await sleep(650);
+    for(let encounter=0;encounter<rounds&&!this.destroyed;encounter++){
+      const isFeint=feints.has(encounter),side=seededUnit(this.state.seed,310+encounter)>.5?'right':'left';
+      const telegraphMs=Math.round(650+seededUnit(this.state.seed,330+encounter)*650);
+      const windowMs=Math.max(220,Math.round(340-encounter*13));
+      roundEl.textContent=String(encounter+1);arena.className=`parry-arena windup ${side}`;opponent.className=`parry-opponent windup ${side}`;weapon.className='parry-weapon';
+      msg.textContent=encounter<2?'WATCH… WAIT FOR THE STRIKE':'WATCH THE WIND-UP';pad.className='parry-pad';pad.innerHTML='PARRY<small>Do not anticipate</small>';tellFill.style.transition='none';tellFill.style.width='100%';void tellFill.offsetWidth;tellFill.style.transition=`width ${telegraphMs}ms linear`;tellFill.style.width='0%';phase='telegraph';
+      const actionPromise=new Promise<ParryAction>(resolve=>resolveAction=resolve);
+      const telegraphTimer=window.setTimeout(()=>{
+        if(this.destroyed||phase!=='telegraph')return;
+        if(isFeint){phase='locked';resolveAction({kind:'feint-safe'});return;}
+        phase='strike';strikeAt=performance.now();arena.className=`parry-arena strike ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.textContent='STRIKE!';pad.className='parry-pad active';pad.innerHTML=`PARRY NOW!<small>${windowMs} ms window</small>`;sound.beep(680,.04);
+        const missTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='strike')return;phase='locked';resolveAction({kind:'miss'});},windowMs);this.timers.push(missTimer);
+      },telegraphMs);this.timers.push(telegraphTimer);
+      const action=await actionPromise;if(this.destroyed)return;
+      let earned=0,feedback='',detail='',mistake=false;
+      if(action.kind==='feint-safe'){
+        earned=100;feedback='FEINT READ!';detail='You held your nerve';arena.className=`parry-arena feint ${side}`;opponent.className=`parry-opponent feint ${side}`;weapon.className='parry-weapon feint';pad.className='parry-pad success';pad.innerHTML='100 POINTS<small>Correct — do not parry a feint</small>';sound.beep(820,.07);
+      }else if(action.kind==='early'){
+        mistake=true;if(isFeint){feedback='FOOLED BY THE FEINT';detail='You parried an attack that never came';arena.className=`parry-arena feint failed ${side}`;weapon.className='parry-weapon feint';}else{feedback='TOO EARLY';detail='Wait for the strike flash';arena.className=`parry-arena failed ${side}`;}pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>Anticipation was punished</small>';tieBreakPenalty+=2000;
+      }else if(action.kind==='miss'){
+        mistake=true;feedback='TOO LATE';detail='The strike got through';arena.className=`parry-arena failed ${side}`;pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>React when STRIKE appears</small>';tieBreakPenalty+=2000;sound.beep(190,.11);
+      }else{
+        const rt=Math.round(action.reaction||0);earned=Math.max(60,Math.min(100,Math.round(100-40*(rt/windowMs))));tieBreakPenalty+=rt;feedback=earned>=95?'PERFECT PARRY!':earned>=84?'GREAT PARRY!':earned>=72?'GOOD PARRY!':'PARRY!';detail=`${rt} ms reaction`;arena.className=`parry-arena success ${side}`;opponent.className=`parry-opponent blocked ${side}`;pad.className='parry-pad success';pad.innerHTML=`${earned} POINTS<small>${rt} ms reaction</small>`;
+      }
+      points.push(earned);mistakes.push(mistake);total+=earned;scoreEl.textContent=String(total);msg.innerHTML=`${feedback}<small>${detail}</small>`;
+      history.innerHTML=points.map((value,i)=>`<span class="${value===100?'perfect':value>0?'good':'miss'}" title="Encounter ${i+1}">${value===100?'★':value>0?'✓':'×'}</span>`).join('');
+      this.sendProgress(encounter+1,feedback,total);await sleep(780);phase='idle';
     }
-    if(this.destroyed)return;const total=errors.reduce((a,b)=>a+b,0),worst=Math.max(...errors);this.sendResult(total,worst,`${(total/1000).toFixed(2)} s total error`,errors);
+    if(this.destroyed)return;const errors=mistakes.filter(Boolean).length;this.sendResult(total,tieBreakPenalty,`${total} / ${maxScore} pts · ${errors} mistake${errors===1?'':'s'}`,points);
+  }
+  async runTimeStop(){
+    const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
+    stage.innerHTML=`<div class="time-game"><div class="trial-label">TARGET <span id="time-round">1</span> / 3</div><div class="target-box"><small>STOP AT</small><strong id="target-time">${targets[0].toFixed(2)}</strong><em>SECONDS</em></div><div id="clock-display" class="clock-display">GET READY</div><button id="time-pad" class="time-pad">3<small>Starts automatically</small></button><div class="time-limit-note">Each target starts automatically · 20 second stop limit</div><div id="time-history" class="reaction-history"></div></div>`;
+    const roundEl=document.querySelector<HTMLElement>('#time-round')!,targetEl=document.querySelector<HTMLElement>('#target-time')!,clock=document.querySelector<HTMLElement>('#clock-display')!,pad=document.querySelector<HTMLButtonElement>('#time-pad')!,history=document.querySelector<HTMLElement>('#time-history')!;
+    let phase:'countdown'|'running'|'locked'='countdown',startAt=0,resolveStop:(v:{elapsedMs:number;timedOut:boolean})=>void=()=>{};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='running')return;phase='locked';resolveStop({elapsedMs:performance.now()-startAt,timedOut:false});sound.beep(760,.07)});
+    const beginCountdown=async()=>{phase='countdown';pad.classList.remove('stop','timeout');for(const n of [3,2,1]){clock.textContent=String(n);pad.innerHTML=`${n}<small>Get ready — starts automatically</small>`;sound.beep(360+n*80,.05);await sleep(1000);if(this.destroyed)return false;}clock.textContent='0.00';pad.innerHTML='STOP<small>Tap when you reach the target · max 20 s</small>';pad.classList.add('stop');startAt=performance.now();phase='running';const animate=()=>{if(this.destroyed||phase!=='running')return;const e=performance.now()-startAt;clock.textContent=e<1000?(e/1000).toFixed(2):'?.??';this.raf=requestAnimationFrame(animate)};animate();return true;};
+    for(let i=0;i<3&&!this.destroyed;i++){
+      roundEl.textContent=String(i+1);targetEl.textContent=targets[i].toFixed(2);clock.textContent='GET READY';pad.classList.remove('stop','timeout');pad.innerHTML='3<small>Starts automatically</small>';
+      const countdownOk=await beginCountdown();if(!countdownOk||this.destroyed)return;
+      let timeoutId=0;const stopped=await new Promise<{elapsedMs:number;timedOut:boolean}>(r=>{resolveStop=r;timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolveStop({elapsedMs:20000,timedOut:true});},20000);this.timers.push(timeoutId)});clearTimeout(timeoutId);if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
+      const measured=Math.round((stopped.elapsedMs/1000)*100)/100;const err=Math.round(Math.abs(measured-targets[i])*1000);errors.push(err);timedOutRounds.push(stopped.timedOut);clock.textContent=stopped.timedOut?'TIME OUT':`${measured.toFixed(2)} s`;pad.classList.remove('stop');if(stopped.timedOut)pad.classList.add('timeout');pad.innerHTML=stopped.timedOut?`TIME OUT<small>Scored as 20.00 s · next target loading</small>`:`ERROR ${(err/1000).toFixed(2)} s<small>Target ${targets[i].toFixed(2)} s</small>`;history.innerHTML=errors.map((v,j)=>`<span class="${timedOutRounds[j]?'timed-out':''}">${j+1}: ${timedOutRounds[j]?'TIME OUT ':''}+${(v/1000).toFixed(2)} s</span>`).join('');this.sendProgress(i+1,stopped.timedOut?'TIME OUT':'TIMING ERROR',err);sound.beep(stopped.timedOut?180:err<=30?900:err<=100?650:420,.08);await sleep(1200);
+    }
+    if(this.destroyed)return;const total=errors.reduce((a,b)=>a+b,0),worst=Math.max(...errors),timeouts=timedOutRounds.filter(Boolean).length;this.sendResult(total,worst,`${(total/1000).toFixed(2)} s total error${timeouts?` · ${timeouts} timeout${timeouts===1?'':'s'}`:''}`,errors);
   }
 }
 
