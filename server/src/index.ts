@@ -3484,7 +3484,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3511,7 +3511,8 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   if (!ra || !rb) return;
 
   let winnerId: string;
-  if (ra.score !== rb.score) winnerId = ra.score < rb.score ? a : b;
+  const higherScoreWins = state.gameId === 'shrink-ring';
+  if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
 
@@ -3542,6 +3543,10 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
   const rounds = Array.isArray(raw.rounds)
     ? raw.rounds.slice(0, 8).map((value: unknown) => Number(value)).filter((value: number) => Number.isFinite(value) && value >= 0 && value <= 120000)
     : [];
+  if (state.gameId === 'shrink-ring') {
+    if (score > 300 || secondary > 54000) throw new Error('Invalid Shrink Ring score.');
+    if (rounds.length !== 3 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Shrink Ring ring scores.');
+  }
   state.results[playerId] = {
     score,
     secondary,
@@ -3568,7 +3573,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3579,6 +3584,17 @@ function startPrecision(room: Room, court: Court, match: Match) {
           secondary: score,
           display: `${(score / 1000).toFixed(3)} s median`,
           rounds: Array.from({ length: 5 }, () => Math.round(score - 25 + Math.random() * 50)),
+        });
+      } else if (room.selectedGameId === 'shrink-ring') {
+        const rounds = Array.from({ length: 3 }, () => Math.random() < 0.18 ? 0 : Math.round(58 + Math.random() * 39));
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const hits = rounds.filter((value) => value > 0).length;
+        const secondary = rounds.reduce((total, value) => total + (value > 0 ? (100 - value) * 35 : 9000), 0);
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary,
+          display: `${score} / 300 pts · ${hits}/3 hits`,
+          rounds,
         });
       } else {
         const score = Math.round((120 + Math.random() * 480) / 10) * 10;
