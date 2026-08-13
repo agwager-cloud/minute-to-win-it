@@ -69,6 +69,12 @@ class MinuteApp{
     const old=this.controller;if(old){old.destroy();this.controller=undefined;}
     if(!this.room||!this.session){this.renderStart();return;}
     if(this.room.phase==='lobby'){this.renderLobby();return;}
+    // Prepared courts are intentionally still in the matchup phase. Keep every
+    // player (including a solo host paired with Minute Bot) on the King of the
+    // Court screen until the host explicitly presses BEGIN MATCHUPS. Routing a
+    // player into a ready match here would show "Preparing challenge…" because
+    // game-specific state is not created until the 3-second start countdown ends.
+    if(this.room.phase==='matchups'){this.renderMatchups();return;}
     const mine=this.activeMatchFor(this.session.playerId);
     if(mine){this.renderGame(mine,false);return;}
     const watched=this.findMatch(this.spectatingMatchId);
