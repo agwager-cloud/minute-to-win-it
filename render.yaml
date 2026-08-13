@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: minute-to-win-it-classroom-260813-a7f3
+    runtime: node
+    region: singapore
+    plan: free
+    buildCommand: npm ci && npm run build -w server
+    startCommand: npm run start -w server
+    autoDeployTrigger: commit
