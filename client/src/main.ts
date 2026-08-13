@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -112,6 +112,10 @@ class MinuteApp{
     this.bindCommon();
     document.querySelectorAll<HTMLElement>('[data-game]').forEach(el=>el.addEventListener('click',()=>{if(!this.me?.isHost)return;this.net.send({type:'select-game',gameId:el.dataset.game})}));
     const car=document.querySelector<HTMLElement>('#game-carousel')!;document.querySelector('#scroll-left')?.addEventListener('click',()=>car.scrollBy({left:-430,behavior:'smooth'}));document.querySelector('#scroll-right')?.addEventListener('click',()=>car.scrollBy({left:430,behavior:'smooth'}));
+    // Re-rendering after select-game used to reset the strip to scrollLeft=0, so
+    // selecting later games (Blind Beat / Overpour / etc.) jumped the view back
+    // to Games 1–4. Always centre the authoritative selected card after render.
+    requestAnimationFrame(()=>{const selected=car.querySelector<HTMLElement>('.game-card.selected');if(!selected)return;const left=selected.offsetLeft-(car.clientWidth-selected.clientWidth)/2;car.scrollTo({left:Math.max(0,left),behavior:'auto'});});
     document.querySelector('#random-game')?.addEventListener('click',()=>{const g=PLAYABLE_GAMES[Math.floor(Math.random()*PLAYABLE_GAMES.length)];this.net.send({type:'select-game',gameId:g.id})});
     document.querySelector('#prepare')?.addEventListener('click',()=>this.net.send({type:'prepare-matchups'}));
     document.querySelectorAll<HTMLElement>('[data-kick]').forEach(el=>el.addEventListener('click',()=>this.net.send({type:'kick-player',playerId:el.dataset.kick})));
@@ -152,7 +156,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -447,6 +451,64 @@ class PrecisionController{
       msg.innerHTML=`${feedback}<small>${detail}</small>`;history.innerHTML=points.map((value,i)=>`<span class="${value>=84?'great':value>=45?'okay':'miss'}"><b>${i+1}</b>${value}</span>`).join('');this.sendProgress(round+1,feedback,total);await sleep(1050);phase='idle';
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)}% avg error`,points);
+  }
+  async runChargeShot(){
+    const stage=this.stage();if(!stage)return;
+    const rounds=5,maxScore=500,points:number[]=[],errors:number[]=[];
+    stage.innerHTML=`<div class="charge-game">
+      <div class="charge-topline"><div class="trial-label">SHOT <span id="charge-round">1</span> / ${rounds}</div><div class="charge-score">SCORE <strong id="charge-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="charge-arena" id="charge-arena">
+        <div class="charge-sky-glow"></div>
+        <div class="charge-distance"><span>LAUNCH</span><span>MID</span><span>FAR</span></div>
+        <div class="charge-target-zone" id="charge-target-zone"><i></i><b>TARGET</b></div>
+        <div class="charge-ground"></div>
+        <div class="charge-launcher"><span></span></div>
+        <div class="charge-rocket" id="charge-rocket">🚀</div>
+        <div class="charge-landing-marker" id="charge-landing-marker"></div>
+      </div>
+      <div class="charge-controls">
+        <div class="charge-target-card"><small>TARGET RANGE</small><strong id="charge-target-card">70</strong><em id="charge-strength-label">STANDARD LAUNCHER</em></div>
+        <div id="charge-message" class="charge-message">GET READY</div>
+        <div class="charge-meter"><div id="charge-meter-fill"></div><span id="charge-power">0%</span></div>
+        <button id="charge-pad" class="charge-pad">HOLD TO CHARGE<small>Release to launch toward the target</small></button>
+        <div class="charge-wait"><div id="charge-wait-fill"></div></div>
+        <div id="charge-history" class="charge-history"></div>
+      </div>
+    </div>`;
+    const roundEl=document.querySelector<HTMLElement>('#charge-round')!,scoreEl=document.querySelector<HTMLElement>('#charge-score')!,arena=document.querySelector<HTMLElement>('#charge-arena')!,targetZone=document.querySelector<HTMLElement>('#charge-target-zone')!,targetCard=document.querySelector<HTMLElement>('#charge-target-card')!,strengthLabel=document.querySelector<HTMLElement>('#charge-strength-label')!,msg=document.querySelector<HTMLElement>('#charge-message')!,meterFill=document.querySelector<HTMLElement>('#charge-meter-fill')!,powerEl=document.querySelector<HTMLElement>('#charge-power')!,pad=document.querySelector<HTMLButtonElement>('#charge-pad')!,waitFill=document.querySelector<HTMLElement>('#charge-wait-fill')!,rocket=document.querySelector<HTMLElement>('#charge-rocket')!,marker=document.querySelector<HTMLElement>('#charge-landing-marker')!,history=document.querySelector<HTMLElement>('#charge-history')!;
+    type ShotResult={power:number;kind:'released'|'full'|'no-start'};
+    let phase:'idle'|'waiting'|'charging'|'locked'='idle',chargeStarted=0,currentPower=0,chargeRate=40,resolveRound:(r:ShotResult)=>void=()=>{},activePointer=-1;
+    const fire=(kind:'released'|'full')=>{if(phase!=='charging')return;phase='locked';pad.classList.remove('charging');resolveRound({power:Math.min(100,currentPower),kind});};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='waiting')return;phase='charging';activePointer=e.pointerId;try{pad.setPointerCapture(e.pointerId)}catch{}chargeStarted=performance.now();pad.classList.add('charging');pad.innerHTML='CHARGING…<small>Release when you think the power is right</small>';msg.textContent='RELEASE TO FIRE';sound.beep(500,.04);});
+    const release=(e:PointerEvent)=>{if(e.pointerId!==activePointer)return;e.preventDefault();fire('released');};
+    pad.addEventListener('pointerup',release);pad.addEventListener('pointercancel',release);
+    await sleep(650);
+    for(let round=0;round<rounds&&!this.destroyed;round++){
+      roundEl.textContent=String(round+1);currentPower=0;meterFill.style.width='0%';powerEl.textContent='0%';waitFill.style.width='100%';arena.className='charge-arena';pad.className='charge-pad';rocket.style.left='7%';rocket.style.bottom='45px';rocket.style.transform='translate(-50%,0) rotate(-18deg)';marker.className='charge-landing-marker';
+      const target=48+seededUnit(this.state.seed,900+round)*36;const strength=.90+seededUnit(this.state.seed,940+round)*.25;chargeRate=31+seededUnit(this.state.seed,980+round)*20;
+      const targetX=7+target*.86;targetZone.style.left=`${targetX}%`;targetCard.textContent=String(Math.round(target));strengthLabel.textContent=strength<.98?'GENTLE LAUNCHER':strength<1.08?'STANDARD LAUNCHER':'BOOSTED LAUNCHER';
+      msg.textContent='HOLD WHEN READY';pad.innerHTML='HOLD TO CHARGE<small>Release to launch · full charge fires automatically</small>';phase='waiting';activePointer=-1;
+      const waitingStarted=performance.now();let noStartTimer=0;
+      const roundPromise=new Promise<ShotResult>(resolve=>{resolveRound=resolve;noStartTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='waiting')return;phase='locked';resolve({power:0,kind:'no-start'});},4500);this.timers.push(noStartTimer)});
+      const animateCharge=(now:number)=>{if(this.destroyed||phase==='locked'||phase==='idle')return;
+        if(phase==='waiting'){waitFill.style.width=`${Math.max(0,100-(now-waitingStarted)/45)}%`;}
+        else if(phase==='charging'){currentPower=Math.min(100,(now-chargeStarted)*chargeRate/1000);meterFill.style.width=`${currentPower}%`;powerEl.textContent=`${Math.round(currentPower)}%`;rocket.style.transform=`translate(-50%,0) rotate(${-18+Math.sin(now/70)*3}deg) scale(${1+currentPower*.0015})`;if(currentPower>=100){fire('full');return;}}
+        this.raf=requestAnimationFrame(animateCharge);
+      };this.raf=requestAnimationFrame(animateCharge);
+      const result=await roundPromise;clearTimeout(noStartTimer);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;
+      const landing=result.kind==='no-start'?0:Math.min(100,result.power*strength);const landingX=7+landing*.86;const error=result.kind==='no-start'?100:Math.abs(landing-target);const earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-error*4)));
+      if(result.kind!=='no-start'){
+        const start=performance.now(),duration=720,startX=7,endX=landingX;
+        await new Promise<void>(resolve=>{const fly=(now:number)=>{if(this.destroyed){resolve();return;}const t=Math.min(1,(now-start)/duration),ease=1-Math.pow(1-t,2),x=startX+(endX-startX)*ease,y=45+Math.sin(Math.PI*t)*Math.min(150,arena.clientHeight*.48);rocket.style.left=`${x}%`;rocket.style.bottom=`${y}px`;rocket.style.transform=`translate(-50%,0) rotate(${(-18+65*t)}deg)`;if(t<1)this.raf=requestAnimationFrame(fly);else resolve();};this.raf=requestAnimationFrame(fly);});
+        if(this.destroyed)return;marker.style.left=`${landingX}%`;marker.className=`charge-landing-marker show ${earned>=84?'great':earned>=45?'okay':'miss'}`;rocket.style.bottom='45px';
+      }
+      points.push(earned);errors.push(error);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
+      const signed=landing-target,abs=Math.abs(signed);let feedback='',detail='';
+      if(result.kind==='no-start'){feedback='NO SHOT';detail='0 points · shot advanced automatically';arena.classList.add('failed');pad.classList.add('miss');pad.innerHTML='0 POINTS<small>You did not start charging</small>';sound.beep(190,.09);}
+      else {feedback=earned>=96?'BULLSEYE!':earned>=84?'GREAT SHOT!':earned>=68?'GOOD SHOT!':earned>=45?'CLOSE!':signed>0?'OVERSHOT':'FELL SHORT';detail=`Landed ${abs.toFixed(1)} range units ${signed>=0?'past':'short of'} target`;arena.classList.add(earned>=84?'success':earned>=45?'close':'failed');pad.classList.add(earned>=84?'success':earned>=45?'close':'miss');pad.innerHTML=`${earned} POINTS<small>${abs.toFixed(1)} from target${result.kind==='full'?' · auto-fired at full charge':''}</small>`;sound.beep(earned>=90?920:earned>=60?650:330,.07);}
+      msg.innerHTML=`${feedback}<small>${detail}</small>`;history.innerHTML=points.map((value,i)=>`<span class="${value>=84?'great':value>=45?'okay':'miss'}"><b>${i+1}</b>${value}</span>`).join('');this.sendProgress(round+1,feedback,total);await sleep(1050);phase='idle';
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)} avg miss`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
