@@ -3554,8 +3554,8 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Parry total does not match encounter scores.');
   }
   if (state.gameId === 'blind-beat') {
-    if (score > 20000 || secondary > 1500) throw new Error('Invalid Blind Beat score.');
-    if (rounds.length !== 16 || rounds.some((value: number) => value > 1200)) throw new Error('Invalid Blind Beat timing data.');
+    if (score > 2000 || secondary > 750) throw new Error('Invalid Blind Beat score.');
+    if (rounds.length !== 16 || rounds.some((value: number) => value > 750)) throw new Error('Invalid Blind Beat timing data.');
   }
   state.results[playerId] = {
     score,
@@ -3622,10 +3622,10 @@ function startPrecision(room: Room, court: Court, match: Match) {
         if (state.results[playerId]) continue;
         try {
           submitPrecisionResult(room, live.court, live.match, playerId, {
-            score: 16000,
-            secondary: 1000,
-            display: '16.00 s drift · server timeout',
-            rounds: Array.from({ length: 16 }, () => 1000),
+            score: 750,
+            secondary: 750,
+            display: '750 ms avg · server timeout',
+            rounds: Array.from({ length: 16 }, () => 750),
           });
         } catch { /* match may have resolved while watchdog was running */ }
       }
@@ -3692,16 +3692,17 @@ function startPrecision(room: Room, court: Court, match: Match) {
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
-        const rounds = Array.from({ length: 16 }, () => Math.round(28 + Math.random() * 125));
-        // Occasionally give the bot one missed beat so solo testing does not
-        // feel impossibly perfect while still providing a competitive target.
-        if (Math.random() < 0.28) rounds[Math.floor(Math.random() * rounds.length)] = 480;
-        const score = rounds.reduce((total, value) => total + value, 0);
+        const rounds = Array.from({ length: 16 }, () => Math.round(70 + Math.random() * 180));
+        // Occasionally give Minute Bot a genuine missed hidden beat so solo
+        // testing remains competitive without making the bot superhuman.
+        if (Math.random() < 0.28) rounds[Math.floor(Math.random() * rounds.length)] = 750;
+        const score = Math.round(rounds.reduce((total, value) => total + value, 0) / rounds.length);
         const secondary = Math.max(...rounds);
+        const hits = rounds.filter((value) => value < 750).length;
         submitPrecisionResult(room, live.court, live.match, botId, {
           score,
           secondary,
-          display: `${(score / 1000).toFixed(2)} s total drift`,
+          display: `${score} ms avg · ${hits}/16 beats`,
           rounds,
         });
       } else {
