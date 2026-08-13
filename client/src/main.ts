@@ -531,7 +531,7 @@ class PrecisionController{
     </div>`;
     const roundEl=document.querySelector<HTMLElement>('#stack-round')!,scoreEl=document.querySelector<HTMLElement>('#stack-score')!,arena=document.querySelector<HTMLElement>('#stack-arena')!,tower=document.querySelector<HTMLElement>('#stack-tower')!,moving=document.querySelector<HTMLElement>('#stack-moving')!,slice=document.querySelector<HTMLElement>('#stack-slice')!,status=document.querySelector<HTMLElement>('#stack-status')!,detail=document.querySelector<HTMLElement>('#stack-detail')!,pad=document.querySelector<HTMLButtonElement>('#stack-pad')!,timeFill=document.querySelector<HTMLElement>('#stack-time-fill')!,timeLabel=document.querySelector<HTMLElement>('#stack-time-label')!,history=document.querySelector<HTMLElement>('#stack-history')!;
     type DropResult={left:number;timedOut:boolean};
-    let phase:'idle'|'running'|'locked'='idle',currentWidth=62,topLeft=19,resolveDrop:(r:DropResult)=>void=()=>{},movingLeft=19;
+    let phase:'idle'|'running'|'locked'='idle',currentWidth=49.6,topLeft=25.2,resolveDrop:(r:DropResult)=>void=()=>{},movingLeft=25.2;
     pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='running')return;phase='locked';resolveDrop({left:movingLeft,timedOut:false});sound.beep(780,.05)});
     await sleep(650);
     // Base width/position are percentages of the arena. Vertical spacing is
@@ -541,7 +541,7 @@ class PrecisionController{
     let collapsed=false;
     for(let round=0;round<drops&&!this.destroyed;round++){
       roundEl.textContent=String(round+1);status.className='';status.textContent='WATCH THE SWEEP';detail.textContent=round===0?'Build a clean foundation':'The remaining block is now your new platform';pad.className='stack-pad';pad.innerHTML='DROP BLOCK<small>Tap to place it on the tower</small>';slice.className='stack-slice';timeFill.style.width='100%';
-      const blockWidth=currentWidth;const travelMin=3,travelMax=97-blockWidth;const speed=25+round*3.2+seededUnit(this.state.seed,1320+round)*10;const startFromLeft=seededUnit(this.state.seed,1340+round)>.5;const startLeft=startFromLeft?travelMin:travelMax;const direction=startFromLeft?1:-1;
+      const blockWidth=currentWidth;const travelMin=3,travelMax=97-blockWidth;const speed=27+round*5;const startFromLeft=seededUnit(this.state.seed,1340+round)>.5;const startLeft=startFromLeft?travelMin:travelMax;const direction=startFromLeft?1:-1;
       moving.style.width=`${blockWidth}%`;moving.style.left=`${startLeft}%`;moving.style.bottom=`${firstBottom+round*blockStep}px`;moving.className='stack-moving active';moving.querySelector('span')!.textContent=round===0?'FIRST BLOCK':`BLOCK ${round+1}`;movingLeft=startLeft;phase='running';const started=performance.now();
       let timeoutId=0;const resultPromise=new Promise<DropResult>(resolve=>{resolveDrop=resolve;timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolve({left:movingLeft,timedOut:true});},6000);this.timers.push(timeoutId)});
       const animate=(now:number)=>{if(this.destroyed||phase!=='running')return;const elapsed=(now-started)/1000;const span=Math.max(.1,travelMax-travelMin);const distance=(speed*elapsed)% (span*2);const offset=distance<=span?distance:(span*2-distance);movingLeft=startFromLeft?travelMin+offset:travelMax-offset;moving.style.left=`${movingLeft}%`;timeFill.style.width=`${Math.max(0,100-(now-started)/60)}%`;timeLabel.textContent=`${Math.max(0,6-(now-started)/1000).toFixed(1)} s`;this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
