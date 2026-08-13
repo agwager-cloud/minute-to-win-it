@@ -78,6 +78,7 @@ class MinuteApp{
       onError:m=>{this.message=m;this.toast(m,'error');},
       onKicked:m=>{this.room=undefined;this.session=undefined;this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;this.message=m;this.render();},
       onResumeFailed:()=>{this.room=undefined;this.session=undefined;this.render();},
+      onLoggedOut:(m)=>{this.room=undefined;this.session=undefined;this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;this.managePlayersOpen=false;this.hostMatchupsMode=false;this.message='';this.render();if(m)this.toast(m,'ok');},
       onSpectatorStreamRequest:(matchId,active)=>this.onSpectatorStreamRequest(matchId,active),
       onSpectatorFrame:frame=>this.onSpectatorFrame(frame),
     });
@@ -143,15 +144,17 @@ class MinuteApp{
   bindCommon(){const btn=document.querySelector<HTMLButtonElement>('#sound-toggle');btn?.addEventListener('click',()=>{const enabled=sound.toggle();btn.textContent=enabled?'🔊':'🔇';if(enabled)sound.beep();});}
   updateConnectionBadge(){const el=document.querySelector('#connection-badge');if(el){el.className=`connection ${this.status}`;el.textContent=this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING';}}
   renderStart(){
-    appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>14 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
+    const rememberedName=localStorage.getItem('mtwi-last-player-name')||'';
+    appEl.innerHTML=this.shell(`<section class="login-layout"><div class="hero-copy"><div class="eyebrow">KING OF THE COURT · PRECISION SERIES</div><h1>MINUTE<br><span>TO WIN IT</span></h1><p>14 rapid-fire head-to-head challenges. React faster, time better, move right.</p><div class="hero-tags"><span>🏎️ Reaction</span><span>⏱️ Timing</span><span>🎯 Precision</span></div></div><div class="login-card"><div class="card-kicker">JOIN THE CLASSROOM</div><label>PLAYER NAME<input id="name" maxlength="22" autocomplete="off" placeholder="Alex Smith" value="${esc(rememberedName)}"></label><label>ROOM CODE<input id="code" maxlength="5" inputmode="numeric" pattern="[0-9]*" placeholder="12345"></label><div class="login-actions"><button id="host" class="primary">HOST GAME</button><button id="join" class="secondary">JOIN ROOM</button></div><div class="wake-note"><span class="pulse-dot"></span><div><strong>${this.status==='online'?'Server ready':this.status==='offline'?'Reconnecting automatically':'Waking game server…'}</strong><small>${esc(this.statusDetail||'Render may take a little while to wake on the free service. Do not refresh.')}</small></div></div>${this.message?`<div class="error-box">${esc(this.message)}</div>`:''}</div></section>`,'start-screen');
     this.bindCommon();const name=document.querySelector<HTMLInputElement>('#name')!,code=document.querySelector<HTMLInputElement>('#code')!;code.addEventListener('input',()=>code.value=code.value.replace(/\D/g,'').slice(0,5));
-    document.querySelector('#host')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.hostRoom(name.value.trim())});
-    document.querySelector('#join')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.joinRoom(name.value.trim(),code.value.trim())});
+    const remember=()=>{const value=name.value.trim();if(value)localStorage.setItem('mtwi-last-player-name',value);return value;};
+    document.querySelector('#host')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.hostRoom(remember())});
+    document.querySelector('#join')?.addEventListener('click',()=>{sound.beep();this.message='';this.net.joinRoom(remember(),code.value.trim())});
   }
   renderLobby(){
     const players=this.room!.players.filter(p=>!p.isBot);const game=this.selectedGame;
     const cards=GAMES.map((g,i)=>`<button class="game-card ${g.id===game.id?'selected':''} ${g.playable?'':'locked'}" data-game="${g.id}" ${!this.me?.isHost||!g.playable?'disabled':''}><span class="game-no">${String(i+1).padStart(2,'0')}</span><span class="game-icon">${g.symbol}</span><strong>${esc(g.title)}</strong><small>${esc(g.category)}</small><em>${g.playable?'PLAYABLE':'COMING SOON'}</em></button>`).join('');
-    appEl.innerHTML=this.shell(`<section class="lobby-wrap"><div class="lobby-title"><div><span class="eyebrow">HOST SELECTOR</span><h2>Choose the next challenge</h2></div><div class="selected-chip"><span>${game.symbol}</span><div><small>SELECTED</small><strong>${esc(game.title)}</strong></div></div></div><div class="carousel-shell"><button id="scroll-left" class="carousel-arrow">‹</button><div id="game-carousel" class="game-carousel">${cards}</div><button id="scroll-right" class="carousel-arrow">›</button></div><div class="lobby-bottom"><section class="player-panel"><div class="panel-head"><strong>PLAYERS</strong><span>${players.length}/40</span></div><div class="player-grid">${players.map(p=>`<div class="player-chip ${p.isHost?'host':''}"><span class="presence ${p.connected?'on':''}"></span><strong>${esc(p.name)}</strong>${p.isHost?'<small>HOST</small>':''}${this.me?.isHost&&!p.isHost?`<button class="kick" data-kick="${p.id}">×</button>`:''}</div>`).join('')}</div></section><section class="launch-panel"><div class="challenge-preview"><span class="mega-icon">${game.symbol}</span><div><span class="eyebrow">${esc(game.category)}</span><h3>${esc(game.title)}</h3><p>${esc(game.tagline)}</p><small>${esc(game.duration)}</small></div></div>${this.me?.isHost?`<div class="host-buttons"><button id="random-game" class="secondary">🎲 RANDOM PLAYABLE GAME</button><button id="prepare" class="primary big">CREATE MATCHUPS →</button></div>`:`<div class="waiting-host">Waiting for the host to create matchups…</div>`}</section></div></section>`,'lobby-screen');
+    appEl.innerHTML=this.shell(`<section class="lobby-wrap"><div class="lobby-title"><div><span class="eyebrow">HOST SELECTOR</span><h2>Choose the next challenge</h2></div><div class="lobby-title-actions"><div class="selected-chip"><span>${game.symbol}</span><div><small>SELECTED</small><strong>${esc(game.title)}</strong></div></div>${this.me?.isHost?'<button id="host-logout" class="secondary small host-logout">↪ LOG OUT</button>':''}</div></div><div class="carousel-shell"><button id="scroll-left" class="carousel-arrow">‹</button><div id="game-carousel" class="game-carousel">${cards}</div><button id="scroll-right" class="carousel-arrow">›</button></div><div class="lobby-bottom"><section class="player-panel"><div class="panel-head"><strong>PLAYERS</strong><span>${players.length}/40</span></div><div class="player-grid">${players.map(p=>`<div class="player-chip ${p.isHost?'host':''}"><span class="presence ${p.connected?'on':''}"></span><strong>${esc(p.name)}</strong>${p.isHost?'<small>HOST</small>':''}${this.me?.isHost&&!p.isHost?`<button class="kick" data-kick="${p.id}">×</button>`:''}</div>`).join('')}</div></section><section class="launch-panel"><div class="challenge-preview"><span class="mega-icon">${game.symbol}</span><div><span class="eyebrow">${esc(game.category)}</span><h3>${esc(game.title)}</h3><p>${esc(game.tagline)}</p><small>${esc(game.duration)}</small></div></div>${this.me?.isHost?`<div class="host-buttons"><button id="random-game" class="secondary">🎲 RANDOM PLAYABLE GAME</button><button id="prepare" class="primary big">CREATE MATCHUPS →</button></div>`:`<div class="waiting-host">Waiting for the host to create matchups…</div>`}</section></div></section>`,'lobby-screen');
     this.bindCommon();
     document.querySelectorAll<HTMLElement>('[data-game]').forEach(el=>el.addEventListener('click',()=>{if(!this.me?.isHost)return;this.net.send({type:'select-game',gameId:el.dataset.game})}));
     const car=document.querySelector<HTMLElement>('#game-carousel')!;document.querySelector('#scroll-left')?.addEventListener('click',()=>car.scrollBy({left:-430,behavior:'smooth'}));document.querySelector('#scroll-right')?.addEventListener('click',()=>car.scrollBy({left:430,behavior:'smooth'}));
@@ -161,6 +164,7 @@ class MinuteApp{
     requestAnimationFrame(()=>{const selected=car.querySelector<HTMLElement>('.game-card.selected');if(!selected)return;const left=selected.offsetLeft-(car.clientWidth-selected.clientWidth)/2;car.scrollTo({left:Math.max(0,left),behavior:'auto'});});
     document.querySelector('#random-game')?.addEventListener('click',()=>{const g=PLAYABLE_GAMES[Math.floor(Math.random()*PLAYABLE_GAMES.length)];this.net.send({type:'select-game',gameId:g.id})});
     document.querySelector('#prepare')?.addEventListener('click',()=>this.net.send({type:'prepare-matchups'}));
+    document.querySelector('#host-logout')?.addEventListener('click',()=>{if(window.confirm('Log out of this hosted room and return to the login screen?')){sound.beep(300,.06);this.net.hostLogout();}});
     document.querySelectorAll<HTMLElement>('[data-kick]').forEach(el=>el.addEventListener('click',()=>this.net.send({type:'kick-player',playerId:el.dataset.kick})));
   }
   renderMatchups(){
@@ -223,46 +227,43 @@ class PrecisionController{
     const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
     type TapResult={score:number;falseStart:boolean};
     const falseStartFlags:boolean[]=[];
-    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{};
+    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{},activeTrialToken=0;
     pad.addEventListener('pointerdown',e=>{
       e.preventDefault();
       if(phase==='waiting'){
-        // A tap before lights-out is the ONLY false-start condition. Keep the
-        // agreed 1.000 s score for that attempt, but track the false-start flag
-        // separately so a legitimate slow reaction (> 1.000 s) is never mislabeled.
         phase='locked';resolveTap({score:1000,falseStart:true});sound.beep(180,.14);
       }else if(phase==='go'){
-        phase='locked';
-        const rt=Math.max(0,performance.now()-lightOutAt);
-        resolveTap({score:rt,falseStart:false});sound.beep(820,.06);
+        phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap({score:rt,falseStart:false});sound.beep(820,.06);
       }
     });
     await sleep(800);
     for(let trial=0;trial<5&&!this.destroyed;trial++){
-      // Arm this trial BEFORE the first red light starts building. Previously an
-      // extremely early tap could set phase='locked' while resolveTap still
-      // pointed at the previous/no-op resolver, leaving the new trial waiting
-      // forever with the red lights stuck on screen.
+      const token=++activeTrialToken;
       let trialResolved=false;
-      const resultPromise=new Promise<TapResult>(resolve=>{
-        resolveTap=(value)=>{if(trialResolved)return;trialResolved=true;resolve(value);};
-      });
+      const resultPromise=new Promise<TapResult>(resolve=>{resolveTap=(value)=>{if(trialResolved||token!==activeTrialToken)return;trialResolved=true;resolve(value);};});
       trialEl.textContent=String(trial+1);document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go','false');pad.innerHTML='WAIT…<small>Do not anticipate</small>';msg.textContent='LIGHTS BUILDING';phase='waiting';
       for(let i=0;i<5;i++){
         await sleep(300);if(this.destroyed)return;
-        // A false start during the build ends this trial immediately. Do not keep
-        // illuminating later lights after the attempt has already been recorded.
-        if(phase!=='waiting')break;
+        if(token!==activeTrialToken||phase!=='waiting')break;
         document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);
       }
-      if(phase==='waiting'){
+      if(token===activeTrialToken&&phase==='waiting'){
         const delay=650+seededUnit(this.state.seed,trial)*1800;
-        void (async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{if(this.destroyed||phase!=='waiting'){r();return;}document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
+        void (async()=>{
+          await sleep(delay);
+          if(this.destroyed||token!==activeTrialToken||phase!=='waiting')return;
+          await new Promise<void>(r=>requestAnimationFrame(()=>{
+            if(this.destroyed||token!==activeTrialToken||phase!=='waiting'){r();return;}
+            document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();
+          }));
+        })();
       }
       const tap=await resultPromise;if(this.destroyed)return;
-      // Always clear the visual lights as soon as a false start/reaction is
-      // accepted, so the next attempt never inherits a stuck red-light state.
-      document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));
+      // Invalidate every delayed action owned by this trial BEFORE feedback or the
+      // next trial starts. A stale random-delay task can therefore never turn a
+      // later three-light build into GO! after a spammed false start.
+      if(token===activeTrialToken)activeTrialToken++;
+      phase='locked';document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go');
       const reaction=Math.round(tap.score);scores.push(reaction);falseStartFlags.push(tap.falseStart);
       if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
       history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
@@ -293,7 +294,7 @@ class PrecisionController{
     for(let ring=0;ring<3&&!this.destroyed;ring++){
       roundEl.textContent=String(ring+1);
       document.querySelectorAll<HTMLElement>('.shrink-track').forEach((el,i)=>el.classList.toggle('active',i===ring));
-      const width=ring===0?baseWidths[0]:(previousHit?shrunkWidths[ring]:baseWidths[ring]);
+      const width:number=ring===0?baseWidths[0]:(previousHit?shrunkWidths[ring]:baseWidths[ring]);
       const targetCenter=20+seededUnit(this.state.seed,60+ring)*320;
       const targetStart=targetCenter-width/2;
       const target=document.querySelector<HTMLElement>(`#shrink-target-${ring}`)!;
@@ -313,7 +314,7 @@ class PrecisionController{
       this.raf=requestAnimationFrame(animate);
       timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolveStop({angle:currentAngle,timedOut:true});},8000);this.timers.push(timeoutId);
       const stopped=await stopPromise;if(this.destroyed)return;clearTimeout(timeoutId);if(this.raf)cancelAnimationFrame(this.raf);
-      const dist=angularDistance(stopped.angle,targetCenter),inside=!stopped.timedOut&&dist<=width/2;
+      const dist=angularDistance(stopped.angle,targetCenter),inside:boolean=!stopped.timedOut&&dist<=width/2;
       const ringPoints=inside?Math.max(50,Math.min(100,Math.round(100-50*(dist/(width/2))))):0;
       points.push(ringPoints);hitFlags.push(inside);totalError+=dist;
       const marker=document.querySelector<HTMLElement>(`#shrink-marker-${ring}`)!;const rad=stopped.angle*Math.PI/180;marker.style.left=`calc(50% + ${Math.sin(rad)*radius}px)`;marker.style.top=`calc(50% - ${Math.cos(rad)*radius}px)`;marker.className=`shrink-stop-marker show ${inside?'hit':'miss'}`;

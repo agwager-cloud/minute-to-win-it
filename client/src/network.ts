@@ -31,6 +31,7 @@ type Events = {
   onError:(message:string,code?:string)=>void;
   onKicked:(message:string,bannedName?:string,roomCode?:string)=>void;
   onResumeFailed:()=>void;
+  onLoggedOut:(message?:string)=>void;
   onSpectatorStreamRequest:(matchId:string,active:boolean)=>void;
   onSpectatorFrame:(frame:SpectatorFrame)=>void;
 };
@@ -77,6 +78,7 @@ export class NetworkClient {
       case'error':this.events.onError(p.message||'Something went wrong.',p.code);break;
       case'kicked':this.clearSession();this.events.onKicked(p.message||'You were removed by the host.',p.bannedName,p.roomCode);break;
       case'resume-failed':this.clearSession();this.events.onStatus('online');this.events.onResumeFailed();break;
+      case'logged-out':this.clearSession();this.events.onStatus('online');this.events.onLoggedOut(p.message);break;
     }});
     socket.addEventListener('close',()=>{if(this.ws!==socket)return;this.connected=false;this.stopHeartbeat();if(!this.stopped){this.events.onStatus('offline','Connection lost. Reconnecting automatically — active matches allow a 20 second resume window.');this.scheduleReconnect();}});
   }
@@ -96,4 +98,5 @@ export class NetworkClient {
   send(payload:unknown){if(!this.isOnline()){this.events.onError('Still connecting to the server. Minute to Win It will keep retrying automatically.');return;}this.ws!.send(JSON.stringify(payload));}
   hostRoom(name:string){this.send({type:'host-room',name,deviceId:this.deviceId});}
   joinRoom(name:string,roomCode:string){this.send({type:'join-room',name,roomCode,deviceId:this.deviceId});}
+  hostLogout(){this.send({type:'host-logout'});}
 }
