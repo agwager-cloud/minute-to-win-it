@@ -3484,7 +3484,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace' || gameId === 'ricochet';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3511,7 +3511,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   if (!ra || !rb) return;
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3580,6 +3580,11 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     if (rounds.length !== 3 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Trace path scores.');
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Trace total does not match path scores.');
+  }
+  if (state.gameId === 'ricochet') {
+    if (score > 1000 || secondary > 100000) throw new Error('Invalid Ricochet score.');
+    if (rounds.length !== 1 || rounds.some((value: number) => value > 1000)) throw new Error('Invalid Ricochet shot score.');
+    if (Math.abs(rounds[0] - score) > 0.001) throw new Error('Ricochet total does not match shot score.');
   }
   state.results[playerId] = {
     score,
@@ -3747,6 +3752,29 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 50000);
   }
 
+  // One Shot Ricochet gives the player 12 seconds to aim, then auto-fires.
+  // This watchdog covers a suspended/throttled browser so the single-shot
+  // challenge can never leave the opponent waiting indefinitely.
+  if (room.selectedGameId === 'ricochet') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'ricochet') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 0,
+            secondary: 100000,
+            display: '0 / 1000 pts · server timeout',
+            rounds: [0],
+          });
+        } catch { /* match may have resolved while watchdog was running */ }
+      }
+    }, 24000);
+  }
+
   // Parry is also completely self-advancing, but a suspended browser can
   // throttle JavaScript timers. Force any missing result after 42 seconds so
   // no student can hold a court by backgrounding the tab or refusing input.
@@ -3772,7 +3800,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : room.selectedGameId === 'ricochet' ? 7200 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3857,6 +3885,16 @@ function startPrecision(room: Room, court: Court, match: Match) {
           secondary,
           display: `${score} / 300 pts · ${avgError.toFixed(1)} px avg error`,
           rounds,
+        });
+      } else if (room.selectedGameId === 'ricochet') {
+        const score = Math.random() < 0.14 ? Math.round(180 + Math.random() * 320) : Math.round(610 + Math.random() * 351);
+        const missPx = Math.max(4, Math.round((1000 - score) / 7.4 + Math.random() * 8));
+        const bounceCount = 1 + Math.floor(Math.random() * 3);
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary: Math.min(100000, missPx * 100),
+          display: `${score} / 1000 pts · ${missPx} px miss · ${bounceCount} bounce${bounceCount === 1 ? '' : 's'}`,
+          rounds: [score],
         });
       } else if (room.selectedGameId === 'blind-beat') {
         const rounds = Array.from({ length: 16 }, () => Math.round(70 + Math.random() * 180));
