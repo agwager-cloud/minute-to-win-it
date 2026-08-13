@@ -279,14 +279,14 @@ class PrecisionController{
     for(let encounter=0;encounter<rounds&&!this.destroyed;encounter++){
       const isFeint=feints.has(encounter),side=seededUnit(this.state.seed,310+encounter)>.5?'right':'left';
       const telegraphMs=Math.round(650+seededUnit(this.state.seed,330+encounter)*650);
-      const windowMs=Math.max(220,Math.round(340-encounter*13));
+      const windowMs=Math.max(650,Math.round(850-encounter*22));
       roundEl.textContent=String(encounter+1);arena.className=`parry-arena windup ${side}`;opponent.className=`parry-opponent windup ${side}`;weapon.className='parry-weapon';
       msg.textContent=encounter<2?'WATCH… WAIT FOR THE STRIKE':'WATCH THE WIND-UP';pad.className='parry-pad';pad.innerHTML='PARRY<small>Do not anticipate</small>';tellFill.style.transition='none';tellFill.style.width='100%';void tellFill.offsetWidth;tellFill.style.transition=`width ${telegraphMs}ms linear`;tellFill.style.width='0%';phase='telegraph';
       const actionPromise=new Promise<ParryAction>(resolve=>resolveAction=resolve);
       const telegraphTimer=window.setTimeout(()=>{
         if(this.destroyed||phase!=='telegraph')return;
         if(isFeint){phase='locked';resolveAction({kind:'feint-safe'});return;}
-        phase='strike';strikeAt=performance.now();arena.className=`parry-arena strike ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.textContent='STRIKE!';pad.className='parry-pad active';pad.innerHTML=`PARRY NOW!<small>${windowMs} ms window</small>`;sound.beep(680,.04);
+        phase='strike';strikeAt=performance.now();arena.className=`parry-arena strike ${side}`;opponent.className=`parry-opponent strike ${side}`;weapon.className='parry-weapon strike';msg.textContent='STRIKE!';pad.className='parry-pad active';pad.innerHTML=`PARRY NOW!<small>React within ${(windowMs/1000).toFixed(2)} s</small>`;sound.beep(680,.04);
         const missTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='strike')return;phase='locked';resolveAction({kind:'miss'});},windowMs);this.timers.push(missTimer);
       },telegraphMs);this.timers.push(telegraphTimer);
       const action=await actionPromise;if(this.destroyed)return;
@@ -298,7 +298,7 @@ class PrecisionController{
       }else if(action.kind==='miss'){
         mistake=true;feedback='TOO LATE';detail='The strike got through';arena.className=`parry-arena failed ${side}`;pad.className='parry-pad fail';pad.innerHTML='0 POINTS<small>React when STRIKE appears</small>';tieBreakPenalty+=2000;sound.beep(190,.11);
       }else{
-        const rt=Math.round(action.reaction||0);earned=Math.max(60,Math.min(100,Math.round(100-40*(rt/windowMs))));tieBreakPenalty+=rt;feedback=earned>=95?'PERFECT PARRY!':earned>=84?'GREAT PARRY!':earned>=72?'GOOD PARRY!':'PARRY!';detail=`${rt} ms reaction`;arena.className=`parry-arena success ${side}`;opponent.className=`parry-opponent blocked ${side}`;pad.className='parry-pad success';pad.innerHTML=`${earned} POINTS<small>${rt} ms reaction</small>`;
+        const rt=Math.round(action.reaction||0);const reactionFloor=180;const reactionSpan=Math.max(1,windowMs-reactionFloor);const timing=Math.max(0,Math.min(1,(rt-reactionFloor)/reactionSpan));earned=Math.max(40,Math.min(100,Math.round(100-60*timing)));tieBreakPenalty+=rt;feedback=earned>=96?'PERFECT PARRY!':earned>=86?'GREAT PARRY!':earned>=72?'GOOD PARRY!':earned>=55?'PARRY!':'LATE PARRY!';detail=`${rt} ms reaction`;arena.className=`parry-arena success ${side}`;opponent.className=`parry-opponent blocked ${side}`;pad.className='parry-pad success';pad.innerHTML=`${earned} POINTS<small>${rt} ms reaction · still blocked</small>`;
       }
       points.push(earned);mistakes.push(mistake);total+=earned;scoreEl.textContent=String(total);msg.innerHTML=`${feedback}<small>${detail}</small>`;
       history.innerHTML=points.map((value,i)=>`<span class="${value===100?'perfect':value>0?'good':'miss'}" title="Encounter ${i+1}">${value===100?'★':value>0?'✓':'×'}</span>`).join('');
