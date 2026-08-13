@@ -716,7 +716,7 @@ class PrecisionController{
   }
   async runKnifeWheel(){
     const stage=this.stage();if(!stage)return;
-    const throws=10,maxScore=1000,collisionDeg=13.5;
+    const throws=10,maxScore=1000,collisionDeg=8;
     const points:number[]=[],quality:number[]=[];
     stage.innerHTML=`<div class="knife-game">
       <div class="knife-topline"><div class="trial-label">KNIFE <span id="knife-round">1</span> / ${throws}</div><div class="knife-score">SCORE <strong id="knife-score">0</strong><small>/ ${maxScore}</small></div></div>
@@ -747,7 +747,7 @@ class PrecisionController{
       ctx.save();ctx.translate(cx,cy);ctx.rotate(rotation*Math.PI/180);ctx.strokeStyle='rgba(123,164,211,.22)';ctx.lineWidth=3;for(let i=0;i<8;i++){ctx.rotate(Math.PI/4);ctx.beginPath();ctx.moveTo(16,0);ctx.lineTo(r-18,0);ctx.stroke()}ctx.beginPath();ctx.arc(0,0,20,0,Math.PI*2);ctx.fillStyle='#0c1430';ctx.fill();ctx.strokeStyle='#4ee7ff';ctx.lineWidth=2;ctx.stroke();ctx.restore();
       for(const localAngle of embedded)drawKnife(cx,cy,r,(localAngle+rotation)%360);
       // Contact marker at the bottom of the wheel: all thrown knives enter here.
-      const contactY=cy+r;ctx.beginPath();ctx.arc(cx,contactY,7,0,Math.PI*2);ctx.fillStyle='#68ffc0';ctx.shadowColor='#68ffc0';ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.fillStyle='#82ffca';ctx.font='800 8px system-ui';ctx.textAlign='center';ctx.fillText('IMPACT',cx,contactY+19);
+      const contactY=cy+r;ctx.beginPath();ctx.arc(cx,contactY,7,0,Math.PI*2);ctx.fillStyle='#68ffc0';ctx.shadowColor='#68ffc0';ctx.shadowBlur=16;ctx.fill();ctx.shadowBlur=0;ctx.fillStyle='#82ffca';ctx.font='800 8px system-ui';ctx.textAlign='center';ctx.fillText('IMPACT',cx,contactY-13);
       const startY=h-24,knifeY=flight.active?startY-(startY-contactY)*Math.min(1,flight.progress):startY;ctx.save();ctx.translate(cx,knifeY);ctx.rotate(0);ctx.fillStyle='#f4f8ff';ctx.beginPath();ctx.moveTo(0,-24);ctx.lineTo(5,2);ctx.lineTo(-5,2);ctx.closePath();ctx.fill();ctx.fillStyle='#9daac8';ctx.fillRect(-4,2,8,25);ctx.fillStyle='#ff4e9e';ctx.fillRect(-12,5,24,4);ctx.restore();
       ctx.fillStyle='#9bb2cc';ctx.font='800 8px system-ui';ctx.textAlign='left';ctx.fillText(`${embedded.length} KNIVES ON WHEEL`,14,18);ctx.textAlign='right';ctx.fillText(`${Math.round(Math.abs(speed))}°/s`,w-14,18);
     };
@@ -765,7 +765,7 @@ class PrecisionController{
       if(action==='timeout'){
         if(this.raf)cancelAnimationFrame(this.raf);points.push(0);quality.push(180);phase='idle';throwBtn.disabled=true;throwBtn.classList.add('miss');throwBtn.innerHTML='NO THROW — 0<small>Next knife loading automatically</small>';status.className='bad';status.textContent='TIME OUT';detail.textContent='You have 4.5 seconds for each throw';history.innerHTML=points.map((v,j)=>`<span class="${v?'knife-hit':'knife-miss'}">${j+1}: ${v}</span>`).join('');this.sendProgress(i+1,'TIME OUT',points.reduce((a,b)=>a+b,0));sound.beep(170,.1);await sleep(700);continue;
       }
-      phase='flying';flight={active:true,progress:0,hit:false};throwBtn.disabled=true;throwBtn.classList.add('flying');throwBtn.innerHTML='KNIFE AWAY<small>Watch the impact</small>';status.textContent='KNIFE AWAY';detail.textContent='The wheel keeps moving during the throw';const flightStart=performance.now();let flightLast=flightStart;const flightMs=210;
+      phase='flying';flight={active:true,progress:0,hit:false};throwBtn.disabled=true;throwBtn.classList.add('flying');throwBtn.innerHTML='KNIFE AWAY<small>Watch the impact</small>';status.textContent='KNIFE AWAY';detail.textContent='The wheel keeps moving during the throw';const flightStart=performance.now();let flightLast=flightStart;const flightMs=90;
       await new Promise<void>(resolve=>{const fly=(now:number)=>{if(this.destroyed){resolve();return;}const dt=Math.min(.04,Math.max(0,(now-flightLast)/1000));flightLast=now;rotation=((rotation+speed*dt)%360+360)%360;flight.progress=Math.min(1,(now-flightStart)/flightMs);draw();if(flight.progress>=1){resolve();return;}this.raf=requestAnimationFrame(fly)};this.raf=requestAnimationFrame(fly)});if(this.destroyed)return;
       // Bottom impact is 180 degrees in wheel/world space. Convert it into
       // wheel-local coordinates at the exact impact frame before collision.
