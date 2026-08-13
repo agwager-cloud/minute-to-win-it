@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -152,7 +152,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -391,6 +391,62 @@ class PrecisionController{
     const misses=blindBeats-matched,penalisedExtras=Math.min(extraTaps,32),totalPenalty=beatErrors.reduce((a,b)=>a+b,0)+penalisedExtras*extraPenalty,averageError=Math.round(totalPenalty/blindBeats),worst=Math.max(...beatErrors);
     bars.forEach(el=>{el.classList.remove('current');el.classList.add('complete')});arena.className='beat-arena finished';blindSymbol.textContent='✓';msg.textContent='RHYTHM COMPLETE';pad.className='beat-pad finished';pad.innerHTML=`${averageError} ms AVG ERROR<small>${matched}/16 beats · ${misses} missed · ${extraTaps} extra</small>`;tapCount.textContent='LOWEST AVERAGE ERROR WINS';
     this.sendProgress(8,'FINISHED',averageError);await sleep(1100);if(this.destroyed)return;this.sendResult(averageError,worst,`${averageError} ms avg · ${matched}/16 beats${extraTaps?` · ${extraTaps} extra`:''}`,beatErrors);
+  }
+  async runOverpour(){
+    const stage=this.stage();if(!stage)return;
+    const rounds=5,maxScore=500,points:number[]=[],errors:number[]=[];
+    stage.innerHTML=`<div class="pour-game">
+      <div class="pour-topline"><div class="trial-label">POUR <span id="pour-round">1</span> / ${rounds}</div><div class="pour-score">SCORE <strong id="pour-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="pour-arena" id="pour-arena">
+        <div class="pour-source"><span></span></div><div id="pour-stream" class="pour-stream"></div>
+        <div class="pour-glass-wrap">
+          <div class="pour-glass">
+            <div id="pour-liquid" class="pour-liquid"><i></i><b></b></div>
+            <div id="pour-perfect-band" class="pour-perfect-band"></div>
+            <div id="pour-target" class="pour-target"><span id="pour-target-label">70%</span></div>
+            <div class="pour-glass-shine"></div>
+          </div>
+          <div class="pour-scale"><span>100</span><span>75</span><span>50</span><span>25</span><span>0</span></div>
+        </div>
+      </div>
+      <div class="pour-controls">
+        <div class="pour-target-card"><small>TARGET LEVEL</small><strong id="pour-target-card">70%</strong><em id="pour-speed-label">STEADY FLOW</em></div>
+        <div id="pour-message" class="pour-message">GET READY</div>
+        <button id="pour-pad" class="pour-pad">HOLD TO POUR<small>Press and hold · release near the line</small></button>
+        <div class="pour-wait"><div id="pour-wait-fill"></div></div>
+        <div id="pour-history" class="pour-history"></div>
+      </div>
+    </div>`;
+    const roundEl=document.querySelector<HTMLElement>('#pour-round')!,scoreEl=document.querySelector<HTMLElement>('#pour-score')!,arena=document.querySelector<HTMLElement>('#pour-arena')!,stream=document.querySelector<HTMLElement>('#pour-stream')!,liquid=document.querySelector<HTMLElement>('#pour-liquid')!,band=document.querySelector<HTMLElement>('#pour-perfect-band')!,targetLine=document.querySelector<HTMLElement>('#pour-target')!,targetLabel=document.querySelector<HTMLElement>('#pour-target-label')!,targetCard=document.querySelector<HTMLElement>('#pour-target-card')!,speedLabel=document.querySelector<HTMLElement>('#pour-speed-label')!,msg=document.querySelector<HTMLElement>('#pour-message')!,pad=document.querySelector<HTMLButtonElement>('#pour-pad')!,waitFill=document.querySelector<HTMLElement>('#pour-wait-fill')!,history=document.querySelector<HTMLElement>('#pour-history')!;
+    type PourResult={fill:number;kind:'released'|'no-start'|'overflow'};
+    let phase:'idle'|'waiting'|'pouring'|'locked'='idle',currentFill=0,pourStarted=0,flowRate=35,resolveRound:(r:PourResult)=>void=()=>{},activePointer=-1;
+    const finishPour=(kind:'released'|'overflow')=>{if(phase!=='pouring')return;phase='locked';stream.classList.remove('active');pad.classList.remove('pouring');resolveRound({fill:Math.min(100,currentFill),kind});};
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='waiting')return;phase='pouring';activePointer=e.pointerId;try{pad.setPointerCapture(e.pointerId)}catch{}pourStarted=performance.now();pad.classList.add('pouring');pad.innerHTML='POURING…<small>Release when the liquid reaches the target</small>';msg.textContent='RELEASE AT THE LINE';stream.classList.add('active');sound.beep(520,.04);});
+    const release=(e:PointerEvent)=>{if(e.pointerId!==activePointer)return;e.preventDefault();finishPour('released');};
+    pad.addEventListener('pointerup',release);pad.addEventListener('pointercancel',release);
+    await sleep(650);
+    for(let round=0;round<rounds&&!this.destroyed;round++){
+      roundEl.textContent=String(round+1);currentFill=0;liquid.style.height='0%';arena.className='pour-arena';stream.classList.remove('active');pad.className='pour-pad';waitFill.style.width='100%';
+      const target=Math.round(48+seededUnit(this.state.seed,700+round)*36);flowRate=28+seededUnit(this.state.seed,740+round)*18;
+      const bandBottom=Math.max(0,target-2.5);band.style.bottom=`${bandBottom}%`;band.style.height='5%';targetLine.style.bottom=`${target}%`;targetLabel.textContent=`${target}%`;targetCard.textContent=`${target}%`;speedLabel.textContent=flowRate<34?'GENTLE FLOW':flowRate<40?'STEADY FLOW':'FAST FLOW';
+      msg.textContent='HOLD WHEN READY';pad.innerHTML='HOLD TO POUR<small>Release near the gold target line</small>';phase='waiting';activePointer=-1;
+      const waitingStarted=performance.now();let noStartTimer=0;
+      const roundPromise=new Promise<PourResult>(resolve=>{resolveRound=resolve;noStartTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='waiting')return;phase='locked';resolve({fill:0,kind:'no-start'});},4500);this.timers.push(noStartTimer)});
+      const animate=(now:number)=>{if(this.destroyed||phase==='locked'||phase==='idle')return;
+        if(phase==='waiting'){const left=Math.max(0,100-(now-waitingStarted)/45);waitFill.style.width=`${left}%`;}
+        else if(phase==='pouring'){currentFill=Math.min(100,(now-pourStarted)*flowRate/1000);liquid.style.height=`${currentFill}%`;waitFill.style.width=`${Math.max(0,100-currentFill)}%`;if(currentFill>=100){finishPour('overflow');return;}}
+        this.raf=requestAnimationFrame(animate);
+      };this.raf=requestAnimationFrame(animate);
+      const result=await roundPromise;clearTimeout(noStartTimer);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;
+      const error=result.kind==='no-start'?target:Math.abs(result.fill-target);const earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-error*4)));
+      points.push(earned);errors.push(error);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
+      let feedback='',detail='';
+      if(result.kind==='no-start'){feedback='NO POUR';detail='0 points · round advanced automatically';arena.classList.add('failed');pad.classList.add('miss');pad.innerHTML='0 POINTS<small>You did not start pouring</small>';sound.beep(190,.09);}
+      else if(result.kind==='overflow'){feedback='OVERFLOW!';detail=`${Math.round(error)}% over target · ${earned} points`;arena.classList.add('overflow');pad.classList.add(earned>0?'close':'miss');pad.innerHTML=`${earned} POINTS<small>The glass overflowed</small>`;sound.beep(190,.1);}
+      else {const signed=result.fill-target;const abs=Math.abs(signed);feedback=earned>=96?'PERFECT POUR!':earned>=84?'GREAT POUR!':earned>=68?'GOOD POUR!':earned>=45?'CLOSE!':signed>0?'OVERPOURED':'UNDERPOURED';detail=`${Math.round(result.fill)}% fill · ${abs.toFixed(1)}% ${signed>=0?'over':'under'}`;arena.classList.add(earned>=84?'success':earned>=45?'close':'failed');pad.classList.add(earned>=84?'success':earned>=45?'close':'miss');pad.innerHTML=`${earned} POINTS<small>${abs.toFixed(1)}% from target</small>`;sound.beep(earned>=90?900:earned>=60?650:350,.07);}
+      msg.innerHTML=`${feedback}<small>${detail}</small>`;history.innerHTML=points.map((value,i)=>`<span class="${value>=84?'great':value>=45?'okay':'miss'}"><b>${i+1}</b>${value}</span>`).join('');this.sendProgress(round+1,feedback,total);await sleep(1050);phase='idle';
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)}% avg error`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
