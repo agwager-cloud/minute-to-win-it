@@ -3484,7 +3484,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'drift-line';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3511,7 +3511,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   if (!ra || !rb) return;
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'drift-line';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3569,11 +3569,11 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Charge Shot total does not match round scores.');
   }
-  if (state.gameId === 'drift-line') {
-    if (score > 1000 || secondary > 20000) throw new Error('Invalid Drift Line score.');
-    if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Drift Line sector scores.');
+  if (state.gameId === 'stack') {
+    if (score > 800 || secondary > 10000) throw new Error('Invalid Stack score.');
+    if (rounds.length !== 8 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Stack drop scores.');
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
-    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Drift Line total does not match sector scores.');
+    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Stack total does not match drop scores.');
   }
   state.results[playerId] = {
     score,
@@ -3695,27 +3695,27 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 45000);
   }
 
-  // Drift Line is a fixed 20-second continuous-control run. A suspended
-  // browser cannot be allowed to keep its court waiting after the run should
-  // have finished, so force a safe zero result if no submission arrives.
-  if (room.selectedGameId === 'drift-line') {
+  // Stack gives each of eight moving blocks a six-second local drop window.
+  // This watchdog protects against a suspended/throttled browser so an inactive
+  // device cannot leave a court waiting indefinitely.
+  if (room.selectedGameId === 'stack') {
     const expectedMatchId = match.id;
     setTimeout(() => {
       const live = findLiveMatch(room, expectedMatchId);
       const state = live?.match.precision;
-      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'drift-line') return;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'stack') return;
       for (const playerId of live.match.playerIds) {
         if (state.results[playerId]) continue;
         try {
           submitPrecisionResult(room, live.court, live.match, playerId, {
             score: 0,
-            secondary: 20000,
-            display: '0 / 1000 pts · server timeout',
-            rounds: Array.from({ length: 10 }, () => 0),
+            secondary: 10000,
+            display: '0 / 800 pts · server timeout',
+            rounds: Array.from({ length: 8 }, () => 0),
           });
         } catch { /* match may have resolved while the watchdog was running */ }
       }
-    }, 36000);
+    }, 60000);
   }
 
   // Parry is also completely self-advancing, but a suspended browser can
@@ -3743,7 +3743,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'drift-line' ? 22500 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -3799,14 +3799,23 @@ function startPrecision(room: Room, court: Court, match: Match) {
           display: `${score} / 500 pts · ${(totalError / 5).toFixed(1)} avg miss`,
           rounds,
         });
-      } else if (room.selectedGameId === 'drift-line') {
-        const rounds = Array.from({ length: 10 }, () => Math.random() < 0.12 ? Math.round(50 + Math.random() * 20) : Math.round(72 + Math.random() * 27));
+      } else if (room.selectedGameId === 'stack') {
+        const rounds: number[] = [];
+        let alive = true;
+        for (let i = 0; i < 8; i++) {
+          if (!alive) { rounds.push(0); continue; }
+          const miss = Math.random() < (0.01 + i * 0.007);
+          if (miss) { rounds.push(0); alive = false; continue; }
+          const floor = Math.max(64, 82 - i * 2);
+          rounds.push(Math.round(floor + Math.random() * (101 - floor)));
+        }
         const score = rounds.reduce((total, value) => total + value, 0);
-        const secondary = Math.round(rounds.reduce((total, value) => total + (100 - value), 0) * 12);
+        const secondary = Math.round(rounds.reduce((total, value) => total + (100 - value), 0) * 12.5);
+        const placed = rounds.filter((value) => value > 0).length;
         submitPrecisionResult(room, live.court, live.match, botId, {
           score,
           secondary,
-          display: `${score} / 1000 pts · ${(score / 10).toFixed(1)}% drift quality`,
+          display: `${score} / 800 pts · ${placed}/8 blocks`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
