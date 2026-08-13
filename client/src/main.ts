@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace'||gameId==='ricochet'||gameId==='knife-wheel')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace'||gameId==='ricochet'||gameId==='knife-wheel'||gameId==='conveyor-chef')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -173,7 +173,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -774,6 +774,77 @@ class PrecisionController{
       points.push(earned);quality.push(collision?180:centreDist);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);phase='idle';flight.active=false;timeFill.style.width='0%';timeLabel.textContent=collision?'CLASH!':`${earned} PTS`;if(collision){status.className='bad';status.textContent='CLASH! — 0 POINTS';detail.textContent=`Too close to an existing knife · ${nearest.toFixed(1)}° clearance`;throwBtn.classList.remove('flying');throwBtn.classList.add('miss');throwBtn.innerHTML='KNIFE COLLISION<small>The match continues</small>';sound.beep(150,.13);}else{const label=earned>=96?'PERFECT GAP!':earned>=86?'CLEAN THREAD!':earned>=72?'SAFE THROW':'SQUEEZED IN';status.className=earned>=86?'good':'okay';status.textContent=`${label} — ${earned} PTS`;detail.textContent=`${centreDist.toFixed(1)}° from the centre of the gap`;throwBtn.classList.remove('flying');throwBtn.classList.add('hit');throwBtn.innerHTML=`${earned} POINTS<small>Knife embedded · gap gets tighter</small>`;sound.beep(earned>=95?980:earned>=80?760:580,.08);}history.innerHTML=points.map((v,j)=>`<span class="${v?'knife-hit':'knife-miss'}">${j+1}: ${v}</span>`).join('');this.sendProgress(i+1,collision?'KNIFE COLLISION':'KNIFE EMBEDDED',total);draw();await sleep(820);
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),hits=points.filter(v=>v>0).length,secondary=Math.min(100000,Math.round(quality.reduce((a,b)=>a+b,0)*100));this.sendResult(total,secondary,`${total} / 1000 pts · ${hits}/10 knives`,points);
+  }
+  async runConveyorChef(){
+    const stage=this.stage();if(!stage)return;
+    const cuts=10,maxScore=1000,points:number[]=[],errors:number[]=[];
+    const ingredients=[
+      {emoji:'🥒',name:'CUCUMBER'},
+      {emoji:'🥕',name:'CARROT'},
+      {emoji:'🍅',name:'TOMATO'},
+      {emoji:'🥖',name:'BAGUETTE'},
+      {emoji:'🍆',name:'EGGPLANT'},
+      {emoji:'🌽',name:'CORN'},
+      {emoji:'🥔',name:'POTATO'},
+      {emoji:'🧀',name:'CHEESE'}
+    ];
+    stage.innerHTML=`<div class="chef-game">
+      <div class="chef-topline"><div class="trial-label">ORDER <span id="chef-round">1</span> / ${cuts}</div><div class="chef-score">SCORE <strong id="chef-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="chef-arena" id="chef-arena">
+        <div class="chef-kitchen-bg"><span>🔥</span><span>🍳</span><span>🧂</span><span>🥣</span></div>
+        <div class="chef-order-ticket"><small>HEAD CHEF SAYS</small><strong id="chef-order-name">PRECISION CUT</strong></div>
+        <div class="chef-knife" id="chef-knife"><div class="chef-handle"></div><div class="chef-blade">🔪</div><div class="chef-cut-zone"></div></div>
+        <div class="chef-belt"><div class="chef-belt-stripes"></div><div class="chef-rollers">${Array.from({length:9},()=>'<span></span>').join('')}</div></div>
+        <div class="chef-ingredient" id="chef-ingredient"><span id="chef-food">🥒</span><div class="chef-mark" id="chef-mark"><i></i><b>CUT</b></div></div>
+        <div class="chef-chop-flash" id="chef-chop-flash">CHOP!</div>
+      </div>
+      <div class="chef-controls">
+        <div class="chef-status-card"><small>TRACK THE MARK</small><strong id="chef-status">WATCH THE CONVEYOR</strong><em id="chef-detail">Tap when the glowing line reaches the knife</em></div>
+        <button id="chef-cut" class="chef-cut">CUT!<small>One tap · time the moving guide</small></button>
+        <div class="chef-meter"><div id="chef-meter-fill"></div><span id="chef-meter-label">READY</span></div>
+        <div class="chef-tip">👨‍🍳 The knife stays fixed — follow the marked line, not the centre of the ingredient</div>
+        <div id="chef-history" class="chef-history"></div>
+      </div>
+    </div>`;
+    const arena=document.querySelector<HTMLElement>('#chef-arena')!,roundEl=document.querySelector<HTMLElement>('#chef-round')!,scoreEl=document.querySelector<HTMLElement>('#chef-score')!,orderName=document.querySelector<HTMLElement>('#chef-order-name')!,ingredient=document.querySelector<HTMLElement>('#chef-ingredient')!,food=document.querySelector<HTMLElement>('#chef-food')!,mark=document.querySelector<HTMLElement>('#chef-mark')!,knife=document.querySelector<HTMLElement>('#chef-knife')!,status=document.querySelector<HTMLElement>('#chef-status')!,detail=document.querySelector<HTMLElement>('#chef-detail')!,cutBtn=document.querySelector<HTMLButtonElement>('#chef-cut')!,meterFill=document.querySelector<HTMLElement>('#chef-meter-fill')!,meterLabel=document.querySelector<HTMLElement>('#chef-meter-label')!,history=document.querySelector<HTMLElement>('#chef-history')!,flash=document.querySelector<HTMLElement>('#chef-chop-flash')!;
+    let phase:'idle'|'ready'|'locked'='idle',resolveCut:(v:'cut'|'timeout')=>void=()=>{},targetAt=0,currentMarkX=0,knifeX=0,roundStart=0,roundLimitMs=0;
+    const scoreForError=(errorMs:number)=>Math.max(0,Math.min(100,Math.round(100*Math.exp(-Math.pow(errorMs/210,1.35)))));
+    const doCut=()=>{if(phase!=='ready')return;phase='locked';resolveCut('cut');};
+    cutBtn.addEventListener('pointerdown',e=>{e.preventDefault();doCut();});
+    await sleep(550);
+    for(let i=0;i<cuts&&!this.destroyed;i++){
+      const spec=ingredients[Math.floor(seededUnit(this.state.seed,2700+i)*ingredients.length)%ingredients.length];
+      const markFrac=.27+seededUnit(this.state.seed,2740+i)*.46;
+      const width=Math.max(88,Math.min(142,arena.clientWidth*.22));
+      const startMarkX=arena.clientWidth+Math.max(30,width*.42);
+      knifeX=Math.max(120,Math.min(arena.clientWidth-110,arena.clientWidth*.43));
+      const travelMs=Math.max(1120,Math.round(2050-i*78+(seededUnit(this.state.seed,2780+i)-.5)*230));
+      const speed=(startMarkX-knifeX)/(travelMs/1000);
+      const missAfterMs=680;
+      roundLimitMs=travelMs+missAfterMs;
+      roundStart=performance.now();targetAt=roundStart+travelMs;currentMarkX=startMarkX;
+      roundEl.textContent=String(i+1);orderName.textContent=`${spec.name} · CUT ${Math.round(markFrac*100)}%`;food.textContent=spec.emoji;
+      ingredient.style.width=`${width}px`;mark.style.left=`${markFrac*100}%`;knife.style.left=`${knifeX}px`;flash.style.left=`${knifeX}px`;ingredient.style.transform=`translate3d(${startMarkX-width*markFrac}px,0,0)`;ingredient.className='chef-ingredient';flash.className='chef-chop-flash';
+      phase='ready';cutBtn.disabled=false;cutBtn.className='chef-cut';cutBtn.innerHTML='CUT!<small>Tap when the glowing guide reaches the knife</small>';status.className='';status.textContent=i<3?'TRACK THE CUT LINE':i<7?'BELT SPEED INCREASING':'DINNER RUSH!';detail.textContent=i<3?'The knife is fixed — follow the bright mark':'Stay smooth. Near misses still earn points.';meterFill.style.width='100%';meterLabel.textContent=`BELT ${i+1}/10`;
+      const promise=new Promise<'cut'|'timeout'>(resolve=>{resolveCut=resolve;const timer=window.setTimeout(()=>{if(this.destroyed||phase!=='ready')return;phase='locked';resolve('timeout');},roundLimitMs);this.timers.push(timer)});
+      const animate=(now:number)=>{if(this.destroyed||phase!=='ready')return;const elapsed=Math.max(0,now-roundStart);currentMarkX=startMarkX-speed*(elapsed/1000);const left=currentMarkX-width*markFrac;ingredient.style.transform=`translate3d(${left}px,0,0)`;const remaining=Math.max(0,targetAt+missAfterMs-now);meterFill.style.width=`${Math.max(0,Math.min(100,remaining/roundLimitMs*100))}%`;const toTarget=targetAt-now;meterLabel.textContent=toTarget>0?`${(toTarget/1000).toFixed(1)} s TO KNIFE`:'CUT NOW';this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
+      const action=await promise;if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
+      cutBtn.disabled=true;phase='idle';let earned=0,errorMs=1000,feedback='MISSED ORDER',feedbackClass='bad';
+      if(action==='timeout'){
+        ingredient.classList.add('missed');status.textContent='MISSED THE KNIFE — 0 PTS';detail.textContent='No cut registered before the ingredient passed';cutBtn.classList.add('miss');cutBtn.innerHTML='NO CUT — 0<small>Next ingredient loading automatically</small>';meterLabel.textContent='MISSED';sound.beep(160,.12);
+      }else{
+        const cutAt=performance.now();errorMs=Math.abs(cutAt-targetAt);earned=scoreForError(errorMs);const signed=cutAt-targetAt;currentMarkX=knifeX-speed*(signed/1000);const left=currentMarkX-width*markFrac;ingredient.style.transform=`translate3d(${left}px,0,0)`;ingredient.classList.add('chopped');flash.classList.add('show');
+        if(earned>=97){feedback='MICHELIN CUT!';feedbackClass='good';}
+        else if(earned>=88){feedback='RAZOR SHARP!';feedbackClass='good';}
+        else if(earned>=72){feedback='CLEAN SLICE!';feedbackClass='okay';}
+        else if(earned>=50){feedback='DECENT CUT';feedbackClass='okay';}
+        else if(earned>=20){feedback='ROUGH CHOP';feedbackClass='warn';}
+        else{feedback='WAY OFF LINE';feedbackClass='bad';}
+        const direction=errorMs<18?'dead centre':signed<0?'early':'late';status.className=feedbackClass;status.textContent=`${feedback} — ${earned} PTS`;detail.textContent=`${Math.round(errorMs)} ms ${direction==='dead centre'?'from perfect':direction}`;cutBtn.classList.add(earned>=72?'hit':earned>=20?'okay':'miss');cutBtn.innerHTML=`${earned} POINTS<small>${Math.round(errorMs)} ms from the marked line</small>`;meterLabel.textContent=`${earned} PTS`;sound.beep(earned>=97?1040:earned>=88?850:earned>=72?680:earned>=50?520:earned>=20?350:180,.08);
+      }
+      points.push(earned);errors.push(errorMs);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);history.innerHTML=points.map((v,j)=>`<span class="${v>=88?'chef-perfect':v>=50?'chef-good':v>0?'chef-rough':'chef-miss'}">${j+1}: ${v}</span>`).join('');this.sendProgress(i+1,action==='timeout'?'MISSED ORDER':feedback,total);await sleep(720);
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=Math.round(errors.reduce((a,b)=>a+b,0)/cuts),secondary=Math.min(20000,errors.reduce((a,b)=>a+Math.min(2000,b),0));this.sendResult(total,secondary,`${total} / 1000 pts · ${avgError} ms avg error`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
