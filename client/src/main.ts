@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace'||gameId==='ricochet'||gameId==='knife-wheel'||gameId==='conveyor-chef')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace'||gameId==='ricochet'||gameId==='knife-wheel'||gameId==='conveyor-chef'||gameId==='pole-balance')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -173,7 +173,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -863,6 +863,71 @@ class PrecisionController{
       points.push(earned);errors.push(errorMs);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);history.innerHTML=points.map((v,j)=>`<span class="${v>=88?'chef-perfect':v>=50?'chef-good':v>0?'chef-rough':'chef-miss'}">${j+1}: ${v}</span>`).join('');this.sendProgress(i+1,action==='timeout'?'MISSED ORDER':feedback,total);await sleep(720);
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=Math.round(errors.reduce((a,b)=>a+b,0)/cuts),secondary=Math.min(20000,errors.reduce((a,b)=>a+Math.min(2000,b),0));this.sendResult(total,secondary,`${total} / 1000 pts · ${avgError} ms avg error`,points);
+  }
+  async runPoleBalance(){
+    const stage=this.stage();if(!stage)return;
+    const sections=10,durationMs=18000,sectionMs=durationMs/sections,maxScore=1000;
+    const rounds:number[]=[],sectionQuality=Array.from({length:sections},()=>0),sectionTime=Array.from({length:sections},()=>0),sectionStumbles=Array.from({length:sections},()=>0);
+    stage.innerHTML=`<div class="pole-game">
+      <div class="pole-topline"><div class="trial-label">WALK <span id="pole-section">1</span> / ${sections}</div><div class="pole-score">SCORE <strong id="pole-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="pole-arena" id="pole-arena">
+        <div class="pole-crowd"><span>👏</span><span>🎪</span><span>✨</span><span>👏</span><span>🎟️</span></div>
+        <div class="pole-finish"><b>FINISH</b><i>🏁</i></div>
+        <div class="pole-wire"></div>
+        <div class="pole-checkpoints">${Array.from({length:sections},(_,i)=>`<span data-pole-check="${i}"></span>`).join('')}</div>
+        <div class="pole-wind" id="pole-wind">GUST →</div>
+        <div class="pole-performer" id="pole-performer">
+          <div class="pole-stick" id="pole-stick"><span class="pole-top-weight"></span></div>
+          <div class="pole-hand"></div><div class="pole-person">🤹</div><div class="pole-shadow"></div>
+        </div>
+        <div class="pole-stumble" id="pole-stumble">STUMBLE!</div>
+      </div>
+      <div class="pole-controls">
+        <div class="pole-status-card"><small>KEEP IT UPRIGHT</small><strong id="pole-status">GET READY</strong><em id="pole-detail">Tiny corrections beat long holds</em></div>
+        <div class="pole-angle-meter"><div class="pole-danger left"></div><div class="pole-safe"></div><div class="pole-danger right"></div><i id="pole-angle-needle"></i><span id="pole-angle-label">0°</span></div>
+        <div class="pole-buttons"><button id="pole-left" class="pole-btn left">◀<strong>LEFT</strong><small>hold to push left</small></button><button id="pole-right" class="pole-btn right">▶<strong>RIGHT</strong><small>hold to push right</small></button></div>
+        <div class="pole-progress"><div id="pole-progress-fill"></div><span id="pole-progress-label">STARTING…</span></div>
+        <div class="pole-tip">🤹 Correct toward centre, then RELEASE — the pole keeps its momentum.</div>
+        <div id="pole-history" class="pole-history"></div>
+      </div>
+    </div>`;
+    const arena=document.querySelector<HTMLElement>('#pole-arena')!,sectionEl=document.querySelector<HTMLElement>('#pole-section')!,scoreEl=document.querySelector<HTMLElement>('#pole-score')!,performer=document.querySelector<HTMLElement>('#pole-performer')!,stick=document.querySelector<HTMLElement>('#pole-stick')!,wind=document.querySelector<HTMLElement>('#pole-wind')!,stumbleEl=document.querySelector<HTMLElement>('#pole-stumble')!,status=document.querySelector<HTMLElement>('#pole-status')!,detail=document.querySelector<HTMLElement>('#pole-detail')!,needle=document.querySelector<HTMLElement>('#pole-angle-needle')!,angleLabel=document.querySelector<HTMLElement>('#pole-angle-label')!,leftBtn=document.querySelector<HTMLButtonElement>('#pole-left')!,rightBtn=document.querySelector<HTMLButtonElement>('#pole-right')!,progressFill=document.querySelector<HTMLElement>('#pole-progress-fill')!,progressLabel=document.querySelector<HTMLElement>('#pole-progress-label')!,history=document.querySelector<HTMLElement>('#pole-history')!;
+    const checkpointEls=Array.from(document.querySelectorAll<HTMLElement>('[data-pole-check]'));
+    type Gust={at:number;impulse:number};const gusts:Gust[]=[];let gustAt=1450;
+    for(let j=0;j<12;j++){gustAt+=1250+seededUnit(this.state.seed,5100+j)*550;if(gustAt>=durationMs-450)break;const dir=seededUnit(this.state.seed,5140+j)>.5?1:-1;const strength=3+j*.45+seededUnit(this.state.seed,5180+j)*3.5;gusts.push({at:gustAt,impulse:dir*strength});}
+    let phase:'intro'|'running'|'done'='intro',leftDown=false,rightDown=false,angle=(seededUnit(this.state.seed,5000)-.5)*5,velocity=(seededUnit(this.state.seed,5001)-.5)*2,gustIndex=0,stumbles=0,totalAngleIntegral=0,totalIntegratedTime=0,nextSection=1,startAt=0,lastFrame=0,stumbleUntil=0;
+    const setHeld=(side:'left'|'right',down:boolean,e?:PointerEvent)=>{e?.preventDefault();if(phase!=='running'&&down)return;if(side==='left'){leftDown=down;leftBtn.classList.toggle('held',down);}else{rightDown=down;rightBtn.classList.toggle('held',down);}};
+    const bindHold=(btn:HTMLButtonElement,side:'left'|'right')=>{btn.addEventListener('pointerdown',e=>{if(phase!=='running')return;try{btn.setPointerCapture(e.pointerId)}catch{}setHeld(side,true,e)});btn.addEventListener('pointerup',e=>setHeld(side,false,e));btn.addEventListener('pointercancel',e=>setHeld(side,false,e));btn.addEventListener('lostpointercapture',()=>setHeld(side,false));};
+    bindHold(leftBtn,'left');bindHold(rightBtn,'right');
+    const clearControls=()=>{leftDown=false;rightDown=false;leftBtn.classList.remove('held');rightBtn.classList.remove('held')};
+    const onBlur=()=>clearControls();window.addEventListener('blur',onBlur,{once:true});
+    const sectionScore=(idx:number)=>{if(sectionTime[idx]<=0)return 0;const base=100*sectionQuality[idx]/sectionTime[idx];return Math.max(0,Math.min(100,Math.round(base-sectionStumbles[idx]*18)));};
+    const draw=(elapsed:number)=>{
+      const progress=Math.max(0,Math.min(1,elapsed/durationMs));const arenaWidth=Math.max(1,arena.clientWidth);const x=arenaWidth*(.09+.79*progress);performer.style.left=`${x}px`;stick.style.transform=`translateX(-50%) rotate(${angle.toFixed(2)}deg)`;
+      const meterPct=Math.max(0,Math.min(100,50+(angle/42)*50));needle.style.left=`${meterPct}%`;angleLabel.textContent=`${angle>0?'+':''}${Math.round(angle)}°`;angleLabel.className=Math.abs(angle)<10?'safe':Math.abs(angle)<27?'warn':'danger';
+      progressFill.style.width=`${progress*100}%`;progressLabel.textContent=`${Math.max(0,(durationMs-elapsed)/1000).toFixed(1)} s · ${Math.round(progress*100)}% TO FINISH`;
+      performer.classList.toggle('correct-left',leftDown&&!rightDown);performer.classList.toggle('correct-right',rightDown&&!leftDown);performer.classList.toggle('stumbling',performance.now()<stumbleUntil);
+      const abs=Math.abs(angle);status.className=abs<9?'good':abs<21?'okay':abs<33?'warn':'bad';status.textContent=abs<9?'STEADY!':abs<21?'CORRECT GENTLY':abs<33?'LEANING HARD!':'DANGER — CATCH IT!';detail.textContent=leftDown===rightDown?'Release between corrections to kill the swing':leftDown?'Pushing the pole LEFT': 'Pushing the pole RIGHT';
+    };
+    draw(0);status.textContent='GET READY';detail.textContent='The walk starts automatically';leftBtn.disabled=true;rightBtn.disabled=true;await sleep(700);if(this.destroyed)return;status.textContent='BALANCE!';detail.textContent='Use short LEFT / RIGHT holds';leftBtn.disabled=false;rightBtn.disabled=false;phase='running';startAt=performance.now();lastFrame=startAt;sound.beep(620,.06);
+    await new Promise<void>(resolve=>{
+      const frame=(now:number)=>{
+        if(this.destroyed){resolve();return;}if(phase!=='running'){resolve();return;}
+        const elapsed=Math.min(durationMs,Math.max(0,now-startAt));const rawDt=Math.max(0,(now-lastFrame)/1000);const dt=Math.min(.05,rawDt);lastFrame=now;
+        while(gustIndex<gusts.length&&gusts[gustIndex].at<=elapsed){const gust=gusts[gustIndex++];velocity+=gust.impulse;wind.textContent=gust.impulse>0?'GUST →':'← GUST';wind.className=`pole-wind show ${gust.impulse>0?'right':'left'}`;const windTimer=window.setTimeout(()=>wind.classList.remove('show'),520);this.timers.push(windTimer);sound.beep(300+Math.min(260,Math.abs(gust.impulse)*22),.045);}
+        const control=(rightDown?1:0)-(leftDown?1:0);const difficulty=1+.18*(elapsed/durationMs);const acceleration=1.55*difficulty*angle-.42*velocity+control*55;velocity=Math.max(-105,Math.min(105,velocity+acceleration*dt));angle+=velocity*dt;
+        const sectionIdx=Math.max(0,Math.min(sections-1,Math.floor(elapsed/sectionMs)));if(Math.abs(angle)>=42){stumbles++;sectionStumbles[sectionIdx]++;const sign=angle>=0?1:-1;angle=sign*18;velocity=-sign*10;stumbleUntil=now+520;stumbleEl.textContent=`STUMBLE! −18`;stumbleEl.className='pole-stumble show';const timer=window.setTimeout(()=>stumbleEl.classList.remove('show'),520);this.timers.push(timer);sound.beep(150,.12);}
+        const quality=Math.max(0,1-Math.pow(Math.abs(angle)/34,1.45));sectionQuality[sectionIdx]+=quality*dt;sectionTime[sectionIdx]+=dt;totalAngleIntegral+=Math.abs(angle)*dt;totalIntegratedTime+=dt;
+        while(nextSection*sectionMs<=elapsed&&nextSection<=sections){const idx=nextSection-1;const earned=sectionScore(idx);rounds.push(earned);checkpointEls[idx]?.classList.add(earned>=85?'excellent':earned>=60?'good':earned>=30?'rough':'miss');const total=rounds.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);sectionEl.textContent=String(Math.min(sections,nextSection+1));history.innerHTML=rounds.map((v,j)=>`<span class="${v>=85?'pole-excellent':v>=60?'pole-good':v>=30?'pole-rough':'pole-miss'}">${j+1}: ${v}</span>`).join('');this.sendProgress(nextSection,earned>=85?'STEADY SECTION':sectionStumbles[idx]?'STUMBLED':'BALANCING',total);nextSection++;}
+        draw(elapsed);
+        if(elapsed>=durationMs){phase='done';clearControls();leftBtn.disabled=true;rightBtn.disabled=true;resolve();return;}this.raf=requestAnimationFrame(frame);
+      };this.raf=requestAnimationFrame(frame);
+    });
+    if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
+    while(rounds.length<sections){const idx=rounds.length,earned=sectionScore(idx);rounds.push(earned);checkpointEls[idx]?.classList.add(earned>=85?'excellent':earned>=60?'good':earned>=30?'rough':'miss');}
+    const total=rounds.reduce((a,b)=>a+b,0),avgAngle=totalIntegratedTime>0?totalAngleIntegral/totalIntegratedTime:42,secondary=Math.min(100000,Math.round(avgAngle*1000)+stumbles*1200);
+    scoreEl.textContent=String(total);progressFill.style.width='100%';progressLabel.textContent='FINISH!';status.className=total>=850?'good':total>=650?'okay':total>=400?'warn':'bad';status.textContent=total>=850?'MASTER BALANCE!':total>=650?'STRONG FINISH!':total>=400?'MADE IT!':'WOBBLY FINISH';detail.textContent=`${avgAngle.toFixed(1)}° average lean · ${stumbles} stumble${stumbles===1?'':'s'}`;performer.classList.add('finished');sound.beep(total>=850?980:total>=650?760:520,.12);await sleep(650);if(this.destroyed)return;
+    this.sendResult(total,secondary,`${total} / 1000 pts · ${avgAngle.toFixed(1)}° avg · ${stumbles} stumble${stumbles===1?'':'s'}`,rounds);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
