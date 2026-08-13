@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry'||gameId==='overpour'||gameId==='charge-shot'||gameId==='stack'||gameId==='trace')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -156,7 +156,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -562,6 +562,80 @@ class PrecisionController{
       if(collapsed){while(points.length<drops){points.push(0);overhangs.push(100)}break;}
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgOverhang=overhangs.reduce((a,b)=>a+b,0)/Math.max(1,overhangs.length),secondary=Math.round(avgOverhang*100);this.sendResult(total,secondary,`${total} / 800 pts · ${avgOverhang.toFixed(1)}% avg overhang`,points);
+  }
+  async runTrace(){
+    const stage=this.stage();if(!stage)return;
+    const paths=3,maxScore=300,points:number[]=[],avgErrors:number[]=[];
+    const x0=.07,x1=.93,sampleCount=48;
+    const pathY=(round:number,t:number)=>{
+      const a1=.105+seededUnit(this.state.seed,1600+round*10)*.055;
+      const a2=.035+seededUnit(this.state.seed,1601+round*10)*.045;
+      const f1=1.05+seededUnit(this.state.seed,1602+round*10)*.75;
+      const f2=2.15+seededUnit(this.state.seed,1603+round*10)*1.15;
+      const p1=seededUnit(this.state.seed,1604+round*10)*Math.PI*2;
+      const p2=seededUnit(this.state.seed,1605+round*10)*Math.PI*2;
+      const slope=(seededUnit(this.state.seed,1606+round*10)-.5)*.16;
+      return Math.max(.16,Math.min(.84,.5+slope*(t-.5)+a1*Math.sin(Math.PI*2*f1*t+p1)+a2*Math.sin(Math.PI*2*f2*t+p2)));
+    };
+    const makePath=(round:number)=>{
+      const coords:string[]=[];
+      for(let i=0;i<=120;i++){const t=i/120,x=(x0+(x1-x0)*t)*1000,y=pathY(round,t)*500;coords.push(`${i?'L':'M'} ${x.toFixed(1)} ${y.toFixed(1)}`)}
+      return coords.join(' ');
+    };
+    stage.innerHTML=`<div class="trace-game">
+      <div class="trace-topline"><div class="trial-label">PATH <span id="trace-round">1</span> / ${paths}</div><div class="trace-score">SCORE <strong id="trace-score">0</strong><small>/ ${maxScore}</small></div></div>
+      <div class="trace-arena" id="trace-arena">
+        <div class="trace-grid"></div>
+        <svg class="trace-svg" viewBox="0 0 1000 500" preserveAspectRatio="none" aria-hidden="true">
+          <path id="trace-corridor" class="trace-corridor" d=""></path>
+          <path id="trace-route" class="trace-route" d=""></path>
+          <path id="trace-progress" class="trace-progress" d="" pathLength="100"></path>
+        </svg>
+        <div id="trace-start" class="trace-start"><b>START</b></div>
+        <div id="trace-finish" class="trace-finish"><span>★</span><b>FINISH</b></div>
+        <div id="trace-cursor" class="trace-cursor"></div>
+        <div id="trace-overlay" class="trace-overlay"><strong>PRESS START</strong><small>Hold and trace the glowing line to the finish</small></div>
+      </div>
+      <div class="trace-controls">
+        <div class="trace-status-card"><small>TRACE CONTROL</small><strong id="trace-status">GET READY</strong><em id="trace-detail">Accuracy matters more than speed</em></div>
+        <div class="trace-time"><div id="trace-time-fill"></div><span id="trace-time-label">9.0 s</span></div>
+        <div class="trace-tip">✋ Keep your finger / pointer down and follow the route</div>
+        <div id="trace-history" class="trace-history"></div>
+      </div>
+    </div>`;
+    const roundEl=document.querySelector<HTMLElement>('#trace-round')!,scoreEl=document.querySelector<HTMLElement>('#trace-score')!,arena=document.querySelector<HTMLElement>('#trace-arena')!,corridor=document.querySelector<SVGPathElement>('#trace-corridor')!,route=document.querySelector<SVGPathElement>('#trace-route')!,progressPath=document.querySelector<SVGPathElement>('#trace-progress')!,startDot=document.querySelector<HTMLElement>('#trace-start')!,finishDot=document.querySelector<HTMLElement>('#trace-finish')!,cursor=document.querySelector<HTMLElement>('#trace-cursor')!,overlay=document.querySelector<HTMLElement>('#trace-overlay')!,status=document.querySelector<HTMLElement>('#trace-status')!,detail=document.querySelector<HTMLElement>('#trace-detail')!,timeFill=document.querySelector<HTMLElement>('#trace-time-fill')!,timeLabel=document.querySelector<HTMLElement>('#trace-time-label')!,history=document.querySelector<HTMLElement>('#trace-history')!;
+    type TraceResult={kind:'finished'|'timeout'|'no-start'};
+    let round=0,phase:'idle'|'waiting'|'tracing'|'locked'='idle',activePointer=-1,lastP=0,lastNy=.5,nextSample=0,resolveRound:(r:TraceResult)=>void=()=>{},sampleErrors:number[]=[];
+    let startedAt=0,currentP=0,currentNy=.5;
+    const local=(e:PointerEvent)=>{const r=arena.getBoundingClientRect();return {nx:(e.clientX-r.left)/Math.max(1,r.width),ny:(e.clientY-r.top)/Math.max(1,r.height),w:r.width,h:r.height}};
+    const setCursor=(p:number,ny:number)=>{const nx=x0+(x1-x0)*p;cursor.style.left=`${nx*100}%`;cursor.style.top=`${ny*100}%`;currentP=p;currentNy=ny;progressPath.style.strokeDashoffset=String(Math.max(0,100-p*100));};
+    const processForward=(p:number,ny:number,h:number)=>{
+      p=Math.max(0,Math.min(1,p));
+      if(p<=lastP+.0001){lastP=p;lastNy=ny;setCursor(p,ny);return;}
+      while(nextSample<sampleCount){const sp=(nextSample+1)/sampleCount;if(sp>p+.0001)break;const ratio=Math.max(0,Math.min(1,(sp-lastP)/Math.max(.0001,p-lastP)));const sy=lastNy+(ny-lastNy)*ratio;sampleErrors.push(Math.abs(sy-pathY(round,sp))*h);nextSample++;}
+      lastP=p;lastNy=ny;setCursor(p,ny);
+      if(nextSample>=sampleCount&&p>=.985){phase='locked';resolveRound({kind:'finished'});sound.beep(940,.07);}
+    };
+    const tryStart=(e:PointerEvent)=>{if(phase!=='waiting')return;const pos=local(e),startY=pathY(round,0);if(Math.abs(pos.nx-x0)>.075||Math.abs(pos.ny-startY)>.16)return;e.preventDefault();phase='tracing';activePointer=e.pointerId;try{arena.setPointerCapture(e.pointerId)}catch{}startedAt=performance.now();lastP=0;lastNy=startY;nextSample=0;sampleErrors=[];setCursor(0,startY);cursor.classList.add('active');overlay.classList.add('hidden');status.className='';status.textContent='TRACING';detail.textContent='Stay close to the centre of the glowing route';sound.beep(620,.045);};
+    arena.addEventListener('pointerdown',e=>{
+      if(phase==='waiting'){tryStart(e);return;}
+      if(phase!=='tracing'||activePointer!==-1)return;const pos=local(e),p=Math.max(0,Math.min(1,(pos.nx-x0)/(x1-x0)));const cursorNx=x0+(x1-x0)*currentP;if(Math.hypot((pos.nx-cursorNx)*pos.w,(pos.ny-currentNy)*pos.h)>55||p>currentP+.06)return;e.preventDefault();activePointer=e.pointerId;lastP=currentP;lastNy=currentNy;try{arena.setPointerCapture(e.pointerId)}catch{}status.textContent='TRACING';detail.textContent='Continue from the glowing cursor';
+    });
+    arena.addEventListener('pointermove',e=>{if(phase!=='tracing'||e.pointerId!==activePointer)return;e.preventDefault();const pos=local(e),p=(pos.nx-x0)/(x1-x0);processForward(p,pos.ny,pos.h);});
+    const release=(e:PointerEvent)=>{if(e.pointerId!==activePointer)return;e.preventDefault();activePointer=-1;if(phase==='tracing'){status.textContent='TRACE PAUSED';detail.textContent='Touch the glowing cursor to continue · timer is still running';}};
+    arena.addEventListener('pointerup',release);arena.addEventListener('pointercancel',release);
+    await sleep(600);
+    for(round=0;round<paths&&!this.destroyed;round++){
+      roundEl.textContent=String(round+1);const d=makePath(round);corridor.setAttribute('d',d);route.setAttribute('d',d);progressPath.setAttribute('d',d);progressPath.style.strokeDashoffset='100';arena.className='trace-arena';cursor.className='trace-cursor';overlay.className='trace-overlay';overlay.innerHTML='<strong>PRESS START</strong><small>Hold and trace the glowing line to the finish</small>';status.className='';status.textContent='PRESS START';detail.textContent='Follow the entire path — cutting across loses accuracy';timeFill.style.width='100%';timeLabel.textContent='9.0 s';activePointer=-1;sampleErrors=[];nextSample=0;currentP=0;currentNy=pathY(round,0);lastP=0;lastNy=currentNy;setCursor(0,currentNy);
+      const startY=pathY(round,0),finishY=pathY(round,1);startDot.style.left=`${x0*100}%`;startDot.style.top=`${startY*100}%`;finishDot.style.left=`${x1*100}%`;finishDot.style.top=`${finishY*100}%`;phase='waiting';const waitStarted=performance.now();let noStartTimer=0,traceTimer=0;
+      const resultPromise=new Promise<TraceResult>(resolve=>{resolveRound=resolve;noStartTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='waiting')return;phase='locked';resolve({kind:'no-start'});},4000);this.timers.push(noStartTimer)});
+      const animate=(now:number)=>{if(this.destroyed||phase==='locked'||phase==='idle')return;if(phase==='waiting'){const left=Math.max(0,100-(now-waitStarted)/40);timeFill.style.width=`${left}%`;timeLabel.textContent=`START ${(Math.max(0,4-(now-waitStarted)/1000)).toFixed(1)} s`;}else if(phase==='tracing'){const elapsed=now-startedAt,left=Math.max(0,100-elapsed/90);timeFill.style.width=`${left}%`;timeLabel.textContent=`${Math.max(0,9-elapsed/1000).toFixed(1)} s`;if(elapsed>=9000){phase='locked';resolveRound({kind:'timeout'});return;}}this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
+      const result=await resultPromise;clearTimeout(noStartTimer);clearTimeout(traceTimer);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;activePointer=-1;
+      const missing=Math.max(0,sampleCount-sampleErrors.length),fallbackError=Math.max(54,arena.clientHeight*.20);const allErrors=[...sampleErrors,...Array.from({length:missing},()=>fallbackError)];const avgError=allErrors.reduce((a,b)=>a+b,0)/sampleCount;const completion=sampleErrors.length/sampleCount;let earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-Math.max(0,avgError-4)*1.45)));if(result.kind==='timeout')earned=Math.round(earned*(.45+.55*completion));points.push(earned);avgErrors.push(avgError);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
+      let feedback='';if(result.kind==='no-start'){feedback='NO TRACE';status.className='bad';status.textContent='NO START — 0 POINTS';detail.textContent='The next path loads automatically';arena.classList.add('failed');sound.beep(180,.09);}else if(result.kind==='timeout'){feedback='TIME OUT';status.className=earned>=65?'okay':'bad';status.textContent=`TIME OUT — ${earned} POINTS`;detail.textContent=`${Math.round(completion*100)}% completed · ${avgError.toFixed(1)} px avg error`;arena.classList.add(earned>=65?'okay':'failed');sound.beep(earned>=65?560:220,.08);}else{feedback=earned>=96?'LASER PRECISE!':earned>=86?'EXCELLENT TRACE!':earned>=72?'GREAT TRACE!':earned>=55?'SOLID TRACE!':'WIDE TRACE';status.className=earned>=86?'good':earned>=60?'okay':'warn';status.textContent=`${feedback} — ${earned} PTS`;detail.textContent=`${avgError.toFixed(1)} px average deviation`;arena.classList.add(earned>=86?'success':earned>=55?'okay':'failed');sound.beep(earned>=95?980:earned>=75?760:earned>=55?520:300,.075);}
+      overlay.classList.remove('hidden');overlay.innerHTML=`<strong>${result.kind==='finished'?'PATH COMPLETE':feedback}</strong><small>${earned} points · ${avgError.toFixed(1)} px average deviation</small>`;history.innerHTML=points.map((v,i)=>`<span class="${v>=86?'great':v>=55?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,result.kind==='finished'?feedback:result.kind==='no-start'?'NO TRACE':'TIME OUT',total);await sleep(1050);phase='idle';
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),overallError=avgErrors.reduce((a,b)=>a+b,0)/Math.max(1,avgErrors.length),secondary=Math.min(50000,Math.round(avgErrors.reduce((a,b)=>a+b,0)*100));this.sendResult(total,secondary,`${total} / 300 pts · ${overallError.toFixed(1)} px avg error`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
