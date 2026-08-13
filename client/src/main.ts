@@ -807,7 +807,7 @@ class PrecisionController{
       </div>
     </div>`;
     const arena=document.querySelector<HTMLElement>('#chef-arena')!,roundEl=document.querySelector<HTMLElement>('#chef-round')!,scoreEl=document.querySelector<HTMLElement>('#chef-score')!,orderName=document.querySelector<HTMLElement>('#chef-order-name')!,ingredient=document.querySelector<HTMLElement>('#chef-ingredient')!,food=document.querySelector<HTMLElement>('#chef-food')!,mark=document.querySelector<HTMLElement>('#chef-mark')!,knife=document.querySelector<HTMLElement>('#chef-knife')!,status=document.querySelector<HTMLElement>('#chef-status')!,detail=document.querySelector<HTMLElement>('#chef-detail')!,cutBtn=document.querySelector<HTMLButtonElement>('#chef-cut')!,meterFill=document.querySelector<HTMLElement>('#chef-meter-fill')!,meterLabel=document.querySelector<HTMLElement>('#chef-meter-label')!,history=document.querySelector<HTMLElement>('#chef-history')!,flash=document.querySelector<HTMLElement>('#chef-chop-flash')!;
-    let phase:'idle'|'ready'|'locked'='idle',resolveCut:(v:'cut'|'timeout')=>void=()=>{},targetAt=0,currentMarkX=0,knifeX=0,roundStart=0,roundLimitMs=0;
+    let phase:'idle'|'ready'|'locked'='idle',resolveCut:(v:'cut'|'timeout')=>void=()=>{},targetAt=0,currentMarkX=0,knifeX=0,roundStart=0,roundLimitMs=0,activeRoundToken=0;
     const scoreForError=(errorMs:number)=>Math.max(0,Math.min(100,Math.round(100*Math.exp(-Math.pow(errorMs/210,1.35)))));
     const doCut=()=>{if(phase!=='ready')return;phase='locked';resolveCut('cut');};
     cutBtn.addEventListener('pointerdown',e=>{e.preventDefault();doCut();});
@@ -826,9 +826,27 @@ class PrecisionController{
       roundEl.textContent=String(i+1);orderName.textContent=`${spec.name} · CUT ${Math.round(markFrac*100)}%`;food.textContent=spec.emoji;
       ingredient.style.width=`${width}px`;mark.style.left=`${markFrac*100}%`;knife.style.left=`${knifeX}px`;flash.style.left=`${knifeX}px`;ingredient.style.transform=`translate3d(${startMarkX-width*markFrac}px,0,0)`;ingredient.className='chef-ingredient';flash.className='chef-chop-flash';
       phase='ready';cutBtn.disabled=false;cutBtn.className='chef-cut';cutBtn.innerHTML='CUT!<small>Tap when the glowing guide reaches the knife</small>';status.className='';status.textContent=i<3?'TRACK THE CUT LINE':i<7?'BELT SPEED INCREASING':'DINNER RUSH!';detail.textContent=i<3?'The knife is fixed — follow the bright mark':'Stay smooth. Near misses still earn points.';meterFill.style.width='100%';meterLabel.textContent=`BELT ${i+1}/10`;
-      const promise=new Promise<'cut'|'timeout'>(resolve=>{resolveCut=resolve;const timer=window.setTimeout(()=>{if(this.destroyed||phase!=='ready')return;phase='locked';resolve('timeout');},roundLimitMs);this.timers.push(timer)});
+      // Keep the timeout strictly scoped to this ingredient. Previously a cut
+      // resolved the promise but left its timeout alive. That stale callback
+      // could fire during a later order, see phase === 'ready', set the shared
+      // phase to 'locked', and leave the CURRENT order's promise unresolved.
+      // The client then appeared frozen until the server watchdog ended the
+      // match. Clear every round timer as soon as that same round resolves and
+      // guard the callback with a round token so an old timer can never lock a
+      // newer vegetable.
+      const roundToken=++activeRoundToken;
+      let timeoutId=0;
+      const promise=new Promise<'cut'|'timeout'>(resolve=>{
+        resolveCut=resolve;
+        timeoutId=window.setTimeout(()=>{
+          if(this.destroyed||phase!=='ready'||roundToken!==activeRoundToken)return;
+          phase='locked';
+          resolve('timeout');
+        },roundLimitMs);
+        this.timers.push(timeoutId);
+      });
       const animate=(now:number)=>{if(this.destroyed||phase!=='ready')return;const elapsed=Math.max(0,now-roundStart);currentMarkX=startMarkX-speed*(elapsed/1000);const left=currentMarkX-width*markFrac;ingredient.style.transform=`translate3d(${left}px,0,0)`;const remaining=Math.max(0,targetAt+missAfterMs-now);meterFill.style.width=`${Math.max(0,Math.min(100,remaining/roundLimitMs*100))}%`;const toTarget=targetAt-now;meterLabel.textContent=toTarget>0?`${(toTarget/1000).toFixed(1)} s TO KNIFE`:'CUT NOW';this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
-      const action=await promise;if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
+      const action=await promise;clearTimeout(timeoutId);if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
       cutBtn.disabled=true;phase='idle';let earned=0,errorMs=1000,feedback='MISSED ORDER',feedbackClass='bad';
       if(action==='timeout'){
         ingredient.classList.add('missed');status.textContent='MISSED THE KNIFE — 0 PTS';detail.textContent='No cut registered before the ingredient passed';cutBtn.classList.add('miss');cutBtn.innerHTML='NO CUT — 0<small>Next ingredient loading automatically</small>';meterLabel.textContent='MISSED';sound.beep(160,.12);
