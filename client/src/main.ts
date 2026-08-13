@@ -11,7 +11,7 @@ function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[M
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
 function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
-function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop'||gameId==='blind-beat')return `${(value/1000).toFixed(2)} s drift`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='blind-beat')return `${Math.round(value)} ms avg`;if(gameId==='shrink-ring'||gameId==='parry')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -312,12 +312,13 @@ class PrecisionController{
   async runBlindBeat(){
     const stage=this.stage();if(!stage)return;
     const bpm=Math.round(92+seededUnit(this.state.seed,500)*26),interval=60000/bpm,visibleBeats=16,blindBeats=16;
-    // v0.1.11: Blind Beat is intentionally forgiving enough for classroom play.
-    // A slightly early/late tap should count as timing drift, not immediately as
-    // a missed beat. Miss/extra penalties still discourage stopping or spamming.
-    const matchTolerance=interval*.80,missPenalty=Math.round(interval*.55),extraPenalty=Math.round(interval*.48);
-    const blindErrors=Array<number|undefined>(blindBeats).fill(undefined);let extraTaps=0,blindTapCount=0,nextBlindIndex=0,phase:'countdown'|'visible'|'blind'|'done'='countdown';
-    let firstVisibleAt=0,firstBlindAt=0;
+    // v0.1.12: score Blind Beat as average timing error rather than an opaque
+    // accumulated drift total. A missed hidden beat costs 750 ms and an extra
+    // tap costs 300 ms. Hidden taps are aligned to the whole beat sequence at
+    // the end, preventing one slightly late tap from shifting every later beat.
+    const matchTolerance=Math.min(480,Math.max(380,interval*.75)),missPenalty=750,extraPenalty=300;
+    const blindTaps:number[]=[];let overflowExtraTaps=0,blindTapCount=0,phase:'countdown'|'visible'|'blind'|'done'='countdown';
+    let firstVisibleAt=0,firstBlindAt=0,blindInputGateAt=0;
     stage.innerHTML=`<div class="beat-game">
       <div class="beat-topline"><div class="trial-label">BLIND BEAT <span id="beat-phase-label">GET READY</span></div><div class="beat-tempo">TEMPO <strong>${bpm}</strong><small>BPM</small></div></div>
       <div class="beat-arena" id="beat-arena">
@@ -341,15 +342,13 @@ class PrecisionController{
     pad.addEventListener('pointerdown',e=>{
       e.preventDefault();if(phase==='countdown'||phase==='done')return;flashTap();sound.beep(phase==='visible'?520:430,.025);
       if(phase==='visible')return;
-      blindTapCount++;tapCount.textContent=`BLIND TAPS ${blindTapCount}`;const now=performance.now();
-      // Match beats in sequence with a wide tolerance. This is intentionally more
-      // forgiving than nearest-beat matching: a player can run consistently late
-      // without having every later tap shifted onto the following beat. If they
-      // genuinely skip a beat, we advance past that missed beat and recover.
-      while(nextBlindIndex<blindBeats&&now-(firstBlindAt+nextBlindIndex*interval)>matchTolerance)nextBlindIndex++;
-      if(nextBlindIndex>=blindBeats){extraTaps++;return;}
-      const expected=firstBlindAt+nextBlindIndex*interval,error=now-expected;
-      if(Math.abs(error)<=matchTolerance){blindErrors[nextBlindIndex]=Math.round(Math.abs(error));nextBlindIndex++;}else extraTaps++;
+      const now=performance.now();
+      // The midpoint between visible beat 16 and hidden beat 1 is the handover
+      // boundary. A late tap still belonging to visible beat 16 is ignored rather
+      // than poisoning hidden beat 1 and shifting the whole sequence.
+      if(now<blindInputGateAt)return;
+      blindTapCount++;tapCount.textContent=`BLIND TAPS ${blindTapCount}`;
+      if(blindTaps.length<64)blindTaps.push(now);else overflowExtraTaps++;
     });
     for(const n of [3,2,1]){if(this.destroyed)return;phaseLabel.textContent='GET READY';msg.textContent=`STARTING IN ${n}`;pad.innerHTML=`${n}<small>Then tap with every pulse</small>`;sound.beep(360+n*90,.045);await sleep(700)}
     if(this.destroyed)return;
@@ -360,20 +359,38 @@ class PrecisionController{
       pulse.classList.remove('hit');void pulse.offsetWidth;pulse.classList.add('hit');sound.beep(dot===0?760:610,.035);
       phaseLabel.textContent=`VISIBLE · BAR ${bar+1}/4`;tapCount.textContent=`FOLLOW THE BEAT · ${beat+1} / ${visibleBeats}`;
       const clearId=window.setTimeout(()=>pulse.classList.remove('hit'),Math.min(150,interval*.25));this.timers.push(clearId);
-      if(beat===visibleBeats-1){firstBlindAt=firstVisibleAt+visibleBeats*interval;}
+      if(beat===visibleBeats-1){firstBlindAt=firstVisibleAt+visibleBeats*interval;blindInputGateAt=firstBlindAt-interval/2;}
     }
     if(this.destroyed)return;
     phase='blind';arena.className='beat-arena blind-phase';modeEl.textContent='BLIND MODE';phaseLabel.textContent='BLIND · 4 BARS';msg.textContent='KEEP THE BEAT';pad.innerHTML='TAP<small>No cue now — trust your rhythm</small>';barLabel.textContent='The metronome is hidden · keep the same tempo';pulse.classList.remove('hit');pulse.style.visibility='hidden';blindSymbol.classList.add('show');dots.forEach(el=>el.classList.remove('active'));bars.forEach((el,i)=>{el.classList.remove('current');if(i<4)el.classList.add('complete')});tapCount.textContent='BLIND TAPS 0';this.sendProgress(4,'CUE HIDDEN');
     for(let beat=0;beat<blindBeats&&!this.destroyed;beat++){
       const expected=firstBlindAt+beat*interval;await waitUntil(expected);if(this.destroyed)return;
-      // Deliberately do not alter any on-screen element here. Even a bar marker
-      // changing every four beats would leak the hidden tempo back to the player.
+      // Deliberately no visual or audio beat cue during this section.
       if(beat%4===3){const bar=Math.floor(beat/4);this.sendProgress(5+bar,`BLIND BAR ${bar+1}`);}
     }
-    await waitUntil(firstBlindAt+(blindBeats-1)*interval+interval*.55);if(this.destroyed)return;phase='done';
-    const finalErrors=blindErrors.map(v=>v===undefined?missPenalty:v),misses=blindErrors.filter(v=>v===undefined).length,totalDrift=finalErrors.reduce((a,b)=>a+b,0)+Math.min(extraTaps,16)*extraPenalty,worst=Math.max(...finalErrors,extraTaps?extraPenalty:0);
-    bars.forEach(el=>{el.classList.remove('current');el.classList.add('complete')});arena.className='beat-arena finished';blindSymbol.textContent='✓';msg.textContent='RHYTHM COMPLETE';pad.className='beat-pad finished';pad.innerHTML=`${(totalDrift/1000).toFixed(2)} s DRIFT<small>${misses} missed · ${extraTaps} extra tap${extraTaps===1?'':'s'}</small>`;tapCount.textContent='LOWEST TOTAL DRIFT WINS';
-    this.sendProgress(8,'FINISHED',totalDrift);await sleep(950);if(this.destroyed)return;this.sendResult(totalDrift,worst,`${(totalDrift/1000).toFixed(2)} s drift · ${misses} miss${misses===1?'':'es'}${extraTaps?` · ${extraTaps} extra`:''}`,finalErrors);
+    // Keep accepting a naturally late final tap for the same generous tolerance.
+    await waitUntil(firstBlindAt+(blindBeats-1)*interval+matchTolerance);if(this.destroyed)return;phase='done';
+
+    const expectedBeats=Array.from({length:blindBeats},(_,i)=>firstBlindAt+i*interval);
+    const taps=[...blindTaps].sort((a,b)=>a-b);
+    const n=expectedBeats.length,m=taps.length,INF=1e12;
+    const dp=Array.from({length:n+1},()=>Array<number>(m+1).fill(INF));
+    const choice=Array.from({length:n+1},()=>Array<'match'|'miss'|'extra'|''>(m+1).fill(''));
+    dp[0][0]=0;
+    for(let i=1;i<=n;i++){dp[i][0]=dp[i-1][0]+missPenalty;choice[i][0]='miss';}
+    for(let j=1;j<=m;j++){dp[0][j]=dp[0][j-1]+extraPenalty;choice[0][j]='extra';}
+    for(let i=1;i<=n;i++)for(let j=1;j<=m;j++){
+      let best=dp[i-1][j]+missPenalty,bestChoice:'match'|'miss'|'extra'='miss';
+      const extraCost=dp[i][j-1]+extraPenalty;if(extraCost<best){best=extraCost;bestChoice='extra';}
+      const err=Math.abs(taps[j-1]-expectedBeats[i-1]);
+      if(err<=matchTolerance){const matchCost=dp[i-1][j-1]+err;if(matchCost<=best){best=matchCost;bestChoice='match';}}
+      dp[i][j]=best;choice[i][j]=bestChoice;
+    }
+    const beatErrors=Array<number>(blindBeats).fill(missPenalty);let matched=0,extraTaps=overflowExtraTaps,i=n,j=m;
+    while(i>0||j>0){const c=choice[i][j];if(c==='match'){beatErrors[i-1]=Math.round(Math.abs(taps[j-1]-expectedBeats[i-1]));matched++;i--;j--;}else if(c==='miss'){beatErrors[i-1]=missPenalty;i--;}else if(c==='extra'){extraTaps++;j--;}else break;}
+    const misses=blindBeats-matched,penalisedExtras=Math.min(extraTaps,32),totalPenalty=beatErrors.reduce((a,b)=>a+b,0)+penalisedExtras*extraPenalty,averageError=Math.round(totalPenalty/blindBeats),worst=Math.max(...beatErrors);
+    bars.forEach(el=>{el.classList.remove('current');el.classList.add('complete')});arena.className='beat-arena finished';blindSymbol.textContent='✓';msg.textContent='RHYTHM COMPLETE';pad.className='beat-pad finished';pad.innerHTML=`${averageError} ms AVG ERROR<small>${matched}/16 beats · ${misses} missed · ${extraTaps} extra</small>`;tapCount.textContent='LOWEST AVERAGE ERROR WINS';
+    this.sendProgress(8,'FINISHED',averageError);await sleep(1100);if(this.destroyed)return;this.sendResult(averageError,worst,`${averageError} ms avg · ${matched}/16 beats${extraTaps?` · ${extraTaps} extra`:''}`,beatErrors);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const timedOutRounds:boolean[]=[];const stage=this.stage();if(!stage)return;
