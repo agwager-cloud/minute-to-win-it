@@ -159,10 +159,10 @@ class PrecisionController{
       const outPromise=(async()=>{await sleep(delay);if(this.destroyed||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();}));})();
       void outPromise;
       const reaction=await resultPromise;if(this.destroyed)return;scores.push(Math.round(reaction));
-      if(reaction>=1000){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>1.000 s penalty</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
+      if(reaction>=1000){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
       history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${v>=1000?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,reaction>=1000?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
     }
-    if(this.destroyed)return;const med=median(scores),falseStarts=scores.filter(v=>v>=1000).length,penalty=falseStarts*200,finalScore=med+penalty,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(finalScore,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` + ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
+    if(this.destroyed)return;const med=median(scores),falseStarts=scores.filter(v=>v>=1000).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const stage=this.stage();if(!stage)return;
