@@ -3485,7 +3485,7 @@ function startCraypots(room: Room, court: Court, match: Match) {
 
 
 function isPrecisionGame(gameId: string) {
-  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace' || gameId === 'ricochet' || gameId === 'knife-wheel' || gameId === 'conveyor-chef' || gameId === 'pole-balance';
+  return gameId === 'lights-out' || gameId === 'time-stop' || gameId === 'shrink-ring' || gameId === 'parry' || gameId === 'blind-beat' || gameId === 'overpour' || gameId === 'charge-shot' || gameId === 'stack' || gameId === 'trace' || gameId === 'ricochet' || gameId === 'knife-wheel' || gameId === 'conveyor-chef' || gameId === 'pole-balance' || gameId === 'fuse';
 }
 
 function seededUnit(seed: number, index: number) {
@@ -3579,7 +3579,7 @@ function completePrecisionIfReady(room: Room, court: Court, match: Match) {
   }
 
   let winnerId: string;
-  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet' || state.gameId === 'knife-wheel' || state.gameId === 'conveyor-chef' || state.gameId === 'pole-balance';
+  const higherScoreWins = state.gameId === 'shrink-ring' || state.gameId === 'parry' || state.gameId === 'overpour' || state.gameId === 'charge-shot' || state.gameId === 'stack' || state.gameId === 'trace' || state.gameId === 'ricochet' || state.gameId === 'knife-wheel' || state.gameId === 'conveyor-chef' || state.gameId === 'pole-balance' || state.gameId === 'fuse';
   if (ra.score !== rb.score) winnerId = higherScoreWins ? (ra.score > rb.score ? a : b) : (ra.score < rb.score ? a : b);
   else if (ra.secondary !== rb.secondary) winnerId = ra.secondary < rb.secondary ? a : b;
   else winnerId = Math.random() < 0.5 ? a : b;
@@ -3671,6 +3671,12 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
     if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Pole Balance section scores.');
     const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
     if (Math.abs(roundTotal - score) > 0.001) throw new Error('Pole Balance total does not match section scores.');
+  }
+  if (state.gameId === 'fuse') {
+    if (score > 1000 || secondary > 20000) throw new Error('Invalid Fuse score.');
+    if (rounds.length !== 10 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Fuse gem scores.');
+    const roundTotal = rounds.reduce((total: number, value: number) => total + value, 0);
+    if (Math.abs(roundTotal - score) > 0.001) throw new Error('Fuse total does not match gem scores.');
   }
   state.results[playerId] = {
     score,
@@ -3916,6 +3922,30 @@ function startPrecision(room: Room, court: Court, match: Match) {
     }, 32000);
   }
 
+  // Fuse is a continuously advancing distance-along-path challenge. Input is
+  // optional and the spark never waits, but requestAnimationFrame can still be
+  // suspended by a backgrounded mobile browser. Force a zero result so no
+  // hidden tab can keep a court waiting indefinitely.
+  if (room.selectedGameId === 'fuse') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'fuse') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 0,
+            secondary: 20000,
+            display: '0 / 1000 pts · server timeout',
+            rounds: Array.from({ length: 10 }, () => 0),
+          });
+        } catch { /* match may have resolved while the watchdog was running */ }
+      }
+    }, 38000);
+  }
+
   // Parry is also completely self-advancing, but a suspended browser can
   // throttle JavaScript timers. Force any missing result after 42 seconds so
   // no student can hold a court by backgrounding the tab or refusing input.
@@ -3941,7 +3971,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
 
   const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
   if (botId) {
-    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : room.selectedGameId === 'ricochet' ? 7200 : room.selectedGameId === 'knife-wheel' ? 18500 : room.selectedGameId === 'conveyor-chef' ? 17500 : room.selectedGameId === 'pole-balance' ? 19000 : 4800;
+    const delay = room.selectedGameId === 'time-stop' ? 6200 : room.selectedGameId === 'shrink-ring' ? 7600 : room.selectedGameId === 'parry' ? 12500 : room.selectedGameId === 'blind-beat' ? 23500 : room.selectedGameId === 'overpour' ? 11500 : room.selectedGameId === 'charge-shot' ? 12500 : room.selectedGameId === 'stack' ? 14500 : room.selectedGameId === 'trace' ? 10500 : room.selectedGameId === 'ricochet' ? 7200 : room.selectedGameId === 'knife-wheel' ? 18500 : room.selectedGameId === 'conveyor-chef' ? 17500 : room.selectedGameId === 'pole-balance' ? 19000 : room.selectedGameId === 'fuse' ? 22500 : 4800;
     setTimeout(() => {
       const live = findLiveMatch(room, match.id);
       if (!live?.match.precision || live.match.precision.phase !== 'playing' || live.match.precision.results[botId]) return;
@@ -4090,6 +4120,31 @@ function startPrecision(room: Room, court: Court, match: Match) {
           score,
           secondary,
           display: `${score} / 1000 pts · ${avgAngle.toFixed(1)}° avg · ${stumbles} stumble${stumbles === 1 ? '' : 's'}`,
+          rounds,
+        });
+      } else if (room.selectedGameId === 'fuse') {
+        const rounds: number[] = [];
+        const timingErrors: number[] = [];
+        for (let i = 0; i < 10; i++) {
+          // Minute Bot deliberately skips some riskier gems, especially on the
+          // rapid second fuse, so solo testing reflects the human risk/reward
+          // choice instead of producing a perfect auto-player.
+          const skipChance = i < 5 ? 0.08 + i * 0.008 : 0.13 + (i - 5) * 0.025;
+          if (Math.random() < skipChance) { rounds.push(0); timingErrors.push(900); continue; }
+          const precisionFloor = i < 5 ? 74 : Math.max(58, 72 - (i - 5) * 2.5);
+          const value = Math.round(precisionFloor + Math.random() * (101 - precisionFloor));
+          rounds.push(value);
+          timingErrors.push(Math.max(8, Math.round((100 - value) * 3.0 + 12 + Math.random() * 12)));
+        }
+        const score = rounds.reduce((total, value) => total + value, 0);
+        const gems = rounds.filter((value) => value > 0).length;
+        const collectedErrors = timingErrors.filter((_, index) => rounds[index] > 0);
+        const avgError = collectedErrors.length ? Math.round(collectedErrors.reduce((total, value) => total + value, 0) / collectedErrors.length) : 0;
+        const secondary = Math.min(20000, timingErrors.reduce((total, value) => total + value, 0));
+        submitPrecisionResult(room, live.court, live.match, botId, {
+          score,
+          secondary,
+          display: `${score} / 1000 pts · ${gems}/10 gems${gems ? ` · ${avgError} ms avg pinch` : ''}`,
           rounds,
         });
       } else if (room.selectedGameId === 'blind-beat') {
