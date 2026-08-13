@@ -10,6 +10,8 @@ function esc(v:unknown){return String(v??'').replaceAll('&','&amp;').replaceAll(
 function median(values:number[]){const a=[...values].sort((x,y)=>x-y);return a[Math.floor(a.length/2)]??0}
 function sleep(ms:number){return new Promise<void>(r=>setTimeout(r,ms));}
 function seededUnit(seed:number,index:number){let x=(seed^Math.imul(index+1,0x9e3779b1))>>>0;x^=x<<13;x^=x>>>17;x^=x<<5;return(x>>>0)/0x100000000;}
+function angularDistance(a:number,b:number){const d=Math.abs((((a-b)%360)+540)%360-180);return d;}
+function precisionProgressText(gameId:string,value:number){if(gameId==='lights-out')return `${(value/1000).toFixed(3)} s`;if(gameId==='time-stop')return `${(value/1000).toFixed(2)} s error`;if(gameId==='shrink-ring')return `${Math.round(value)} pts`;return String(value);}
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
@@ -136,7 +138,7 @@ class MinuteApp{
     const myId=this.session!.playerId;const isParticipant=match.playerIds.includes(myId);if(!spectator&&isParticipant&&!precision.results[myId]){this.controller=new PrecisionController(this,match,precision,game);this.controller.start();}else this.renderPrecisionWatcher(match,precision,game,spectator);
   }
   renderPrecisionWatcher(match:MatchState,p:PrecisionState,game:GameDefinition,spectator:boolean){
-    const stage=document.querySelector<HTMLElement>('#precision-stage');if(!stage)return;const cells=match.playerIds.map(id=>{const pl=this.player(id),r=p.results[id],prog=p.progress[id];return `<div class="watch-player"><span class="presence ${pl?.connected?'on':''}"></span><h3>${esc(pl?.name)}</h3>${r?`<div class="submitted">✓ FINISHED<strong>${esc(r.display)}</strong></div>`:`<div class="live-progress"><strong>${esc(prog?.label||'PLAYING')}</strong><span>${prog?.round?`Round ${prog.round}`:'In progress…'}</span>${typeof prog?.value==='number'?`<em>${game.id==='lights-out'?(prog.value/1000).toFixed(3)+' s':(prog.value/1000).toFixed(2)+' s error'}</em>`:''}</div>`}</div>`}).join('');stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${game.symbol}</div><h2>${spectator?'LIVE SPECTATOR':'RESULT SUBMITTED'}</h2><p>${spectator?'This is a read-only live view.':'Waiting for your opponent to finish.'}</p><div class="watch-grid">${cells}</div></div>`;
+    const stage=document.querySelector<HTMLElement>('#precision-stage');if(!stage)return;const cells=match.playerIds.map(id=>{const pl=this.player(id),r=p.results[id],prog=p.progress[id];return `<div class="watch-player"><span class="presence ${pl?.connected?'on':''}"></span><h3>${esc(pl?.name)}</h3>${r?`<div class="submitted">✓ FINISHED<strong>${esc(r.display)}</strong></div>`:`<div class="live-progress"><strong>${esc(prog?.label||'PLAYING')}</strong><span>${prog?.round?`Round ${prog.round}`:'In progress…'}</span>${typeof prog?.value==='number'?`<em>${precisionProgressText(game.id,prog.value)}</em>`:''}</div>`}</div>`}).join('');stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${game.symbol}</div><h2>${spectator?'LIVE SPECTATOR':'RESULT SUBMITTED'}</h2><p>${spectator?'This is a read-only live view.':'Waiting for your opponent to finish.'}</p><div class="watch-grid">${cells}</div></div>`;
   }
   tick(){
     const num=document.querySelector<HTMLElement>('#countdown-number');if(num&&this.room){const m=this.activeMatchFor(this.session?.playerId)||this.findMatch(this.spectatingMatchId);if(m?.startsAt){const n=Math.max(1,Math.ceil((m.startsAt-Date.now())/1000));num.textContent=String(n)}}
@@ -150,7 +152,7 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();}
+  start(){this.running=true;if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();}
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);}
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
@@ -189,6 +191,63 @@ class PrecisionController{
       history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
     }
     if(this.destroyed)return;const med=median(scores),falseStarts=falseStartFlags.filter(Boolean).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
+  }
+  async runShrinkRing(){
+    const stage=this.stage();if(!stage)return;
+    const ringSizes=[360,270,180],baseWidths=[64,52,40],shrunkWidths=[64,36,24];
+    const points:number[]=[],hitFlags:boolean[]=[];let totalError=0;
+    stage.innerHTML=`<div class="shrink-game">
+      <div class="shrink-topline"><div class="trial-label">RING <span id="shrink-round">1</span> / 3</div><div class="shrink-score">SCORE <strong id="shrink-score">0</strong><small>/ 300</small></div></div>
+      <div class="shrink-dial" id="shrink-dial">
+        ${ringSizes.map((size,i)=>`<div class="shrink-track ring-${i+1}" data-ring="${i}" style="--ring-size:${size}px"><div class="shrink-target" id="shrink-target-${i}"></div></div><div class="shrink-stop-marker" id="shrink-marker-${i}"></div>`).join('')}
+        <div id="shrink-needle" class="shrink-needle"><span></span></div><div class="shrink-hub"></div>
+      </div>
+      <div id="shrink-message" class="shrink-message">GET READY</div>
+      <div class="shrink-timer"><div id="shrink-timer-fill"></div></div>
+      <button id="shrink-pad" class="shrink-pad">STOP NEEDLE<small>Tap when the needle is inside the green zone</small></button>
+      <div id="shrink-history" class="reaction-history"></div>
+    </div>`;
+    const roundEl=document.querySelector<HTMLElement>('#shrink-round')!,scoreEl=document.querySelector<HTMLElement>('#shrink-score')!,msg=document.querySelector<HTMLElement>('#shrink-message')!,pad=document.querySelector<HTMLButtonElement>('#shrink-pad')!,needle=document.querySelector<HTMLElement>('#shrink-needle')!,timerFill=document.querySelector<HTMLElement>('#shrink-timer-fill')!,history=document.querySelector<HTMLElement>('#shrink-history')!;
+    let phase:'idle'|'running'|'locked'='idle',resolveStop:(v:{angle:number;timedOut:boolean})=>void=()=>{};
+    let currentAngle=0;
+    pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='running')return;phase='locked';resolveStop({angle:currentAngle,timedOut:false});sound.beep(760,.055);});
+    await sleep(700);
+    let previousHit=false;
+    for(let ring=0;ring<3&&!this.destroyed;ring++){
+      roundEl.textContent=String(ring+1);
+      document.querySelectorAll<HTMLElement>('.shrink-track').forEach((el,i)=>el.classList.toggle('active',i===ring));
+      const width=ring===0?baseWidths[0]:(previousHit?shrunkWidths[ring]:baseWidths[ring]);
+      const targetCenter=20+seededUnit(this.state.seed,60+ring)*320;
+      const targetStart=targetCenter-width/2;
+      const target=document.querySelector<HTMLElement>(`#shrink-target-${ring}`)!;
+      target.style.background=`conic-gradient(from ${targetStart}deg, rgba(77,255,174,.98) 0deg ${width}deg, transparent ${width}deg 360deg)`;
+      target.classList.add('visible');
+      const radius=ringSizes[ring]/2;
+      needle.style.setProperty('--needle-len',`${Math.max(50,radius-9)}px`);
+      const startAngle=seededUnit(this.state.seed,80+ring)*360;
+      const speed=(220+seededUnit(this.state.seed,100+ring)*150)*(seededUnit(this.state.seed,120+ring)>.5?1:-1);
+      currentAngle=startAngle;needle.style.transform=`rotate(${currentAngle}deg)`;
+      const started=performance.now();
+      let timeoutId=0;
+      msg.textContent=previousHit&&ring>0?'TARGET SHRUNK — STAY PRECISE':'STOP INSIDE THE GREEN';
+      pad.classList.remove('hit','miss');pad.innerHTML='STOP NEEDLE<small>Tap anywhere on this button</small>';timerFill.style.width='100%';phase='running';
+      const stopPromise=new Promise<{angle:number;timedOut:boolean}>(resolve=>resolveStop=resolve);
+      const animate=(now:number)=>{if(this.destroyed||phase!=='running')return;const elapsed=now-started;currentAngle=((startAngle+(speed*elapsed/1000))%360+360)%360;needle.style.transform=`rotate(${currentAngle}deg)`;timerFill.style.width=`${Math.max(0,100-elapsed/80)}%`;this.raf=requestAnimationFrame(animate)};
+      this.raf=requestAnimationFrame(animate);
+      timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolveStop({angle:currentAngle,timedOut:true});},8000);this.timers.push(timeoutId);
+      const stopped=await stopPromise;if(this.destroyed)return;clearTimeout(timeoutId);if(this.raf)cancelAnimationFrame(this.raf);
+      const dist=angularDistance(stopped.angle,targetCenter),inside=!stopped.timedOut&&dist<=width/2;
+      const ringPoints=inside?Math.max(50,Math.min(100,Math.round(100-50*(dist/(width/2))))):0;
+      points.push(ringPoints);hitFlags.push(inside);totalError+=dist;
+      const marker=document.querySelector<HTMLElement>(`#shrink-marker-${ring}`)!;const rad=stopped.angle*Math.PI/180;marker.style.left=`calc(50% + ${Math.sin(rad)*radius}px)`;marker.style.top=`calc(50% - ${Math.cos(rad)*radius}px)`;marker.className=`shrink-stop-marker show ${inside?'hit':'miss'}`;
+      const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
+      const feedback=stopped.timedOut?'TIME OUT':!inside?'MISS':ringPoints>=95?'PERFECT!':ringPoints>=82?'GREAT!':ringPoints>=68?'GOOD!':'HIT!';
+      msg.textContent=inside&&ring<2?`${feedback} +${ringPoints} · NEXT ZONE SHRINKS`:`${feedback}${inside?` +${ringPoints}`:''}`;
+      pad.classList.add(inside?'hit':'miss');pad.innerHTML=stopped.timedOut?'0 POINTS<small>You have 8 seconds per ring</small>':inside?`${ringPoints} POINTS<small>${Math.round(dist)}° from centre</small>`:`MISS<small>${Math.round(dist)}° from target centre</small>`;
+      history.innerHTML=points.map((v,i)=>`<span class="${hitFlags[i]?'ring-hit':'ring-miss'}">${i+1}: ${v} pts</span>`).join('');
+      this.sendProgress(ring+1,`${feedback} · RING ${ring+1}`,total);sound.beep(inside?(ringPoints>=95?980:720):220,.08);previousHit=inside;await sleep(1250);phase='idle';
+    }
+    if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),hits=hitFlags.filter(Boolean).length;this.sendResult(total,Math.round(totalError*100),`${total} / 300 pts · ${hits}/3 hits`,points);
   }
   async runTimeStop(){
     const targets=this.state.targets?.length?this.state.targets:[7.43,9.18,12.05];const errors:number[]=[];const stage=this.stage();if(!stage)return;
