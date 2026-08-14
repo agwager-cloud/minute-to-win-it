@@ -222,10 +222,24 @@ class MinuteApp{
 }
 
 class PrecisionController{
-  app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number; private spectatorTimer?:number; private spectatorSequence=0;
+  app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number; private spectatorTimer?:number; private spectatorSequence=0; private spaceTarget?:HTMLElement; private spaceKeyDown?:((e:KeyboardEvent)=>void); private spaceKeyUp?:((e:KeyboardEvent)=>void);
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
+  private bindSpacebar(){
+    if(this.spaceKeyDown||this.destroyed)return;
+    // Silent desktop alternative for the timing/action controls. Dispatching the
+    // same pointer events means Spacebar uses exactly the same phase guards,
+    // scoring and hold/release behaviour as mouse/touch instead of becoming a
+    // separate input implementation.
+    const selectors=['#reaction-pad','#time-pad','#shrink-pad','#parry-pad','#beat-pad','#pour-pad','#charge-pad','#stack-pad','#rico-fire','#knife-throw','#chef-cut','#fuse-pinch'];
+    const editable=(target:EventTarget|null)=>target instanceof HTMLElement&&Boolean(target.closest('input,textarea,select,[contenteditable="true"]'));
+    const current=()=>{for(const selector of selectors){const el=document.querySelector<HTMLButtonElement>(selector);if(el&&!el.disabled&&el.isConnected&&el.getClientRects().length)return el;}return undefined;};
+    this.spaceKeyDown=(e:KeyboardEvent)=>{if(e.code!=='Space'||e.repeat||this.destroyed||editable(e.target))return;const el=current();if(!el)return;e.preventDefault();this.spaceTarget=el;el.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true,cancelable:true,pointerId:777,pointerType:'keyboard',isPrimary:true,button:0,buttons:1}));};
+    this.spaceKeyUp=(e:KeyboardEvent)=>{if(e.code!=='Space'||this.destroyed||editable(e.target))return;const el=this.spaceTarget;this.spaceTarget=undefined;if(!el||!el.isConnected)return;e.preventDefault();el.dispatchEvent(new PointerEvent('pointerup',{bubbles:true,cancelable:true,pointerId:777,pointerType:'keyboard',isPrimary:true,button:0,buttons:0}));};
+    window.addEventListener('keydown',this.spaceKeyDown,{capture:true});window.addEventListener('keyup',this.spaceKeyUp,{capture:true});
+  }
+  private unbindSpacebar(){if(this.spaceKeyDown)window.removeEventListener('keydown',this.spaceKeyDown,{capture:true});if(this.spaceKeyUp)window.removeEventListener('keyup',this.spaceKeyUp,{capture:true});this.spaceKeyDown=undefined;this.spaceKeyUp=undefined;this.spaceTarget=undefined;}
   start(){
-    this.running=true;this.setSpectatorStreaming(this.app.isSpectatorStreamRequested(this.matchId));
+    this.running=true;this.bindSpacebar();this.setSpectatorStreaming(this.app.isSpectatorStreamRequested(this.matchId));
     // A precision controller is normally created once per active attempt. If
     // the same match is created again because the page was refreshed (or the
     // host navigated away and back), never give the player a fresh attempt.
@@ -242,7 +256,7 @@ class PrecisionController{
     if(this.game.id!=='lights-out')this.saveResume({started:true});
     if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();
   }
-  destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
+  destroy(){this.destroyed=true;this.running=false;this.unbindSpacebar();this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
   setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),120);}
   private publishSpectatorFrame(){
     if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;
