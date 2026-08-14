@@ -282,6 +282,7 @@ type PrecisionState = {
   winnerId?: string;
   resultRevealAt?: number;
   ricochetRound?: number;
+  lightsOutAttempts?: Record<string, Array<{ score: number; label: string }>>;
 };
 
 type Match = {
@@ -3715,6 +3716,14 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
   if (state.gameId === 'lights-out') {
     if (score > 3000 || secondary > 3000) throw new Error('Invalid Lights Out score.');
     if (rounds.length !== 5 || rounds.some((value: number) => value > 3000)) throw new Error('Invalid Lights Out reaction data.');
+    // Completed starts are authoritative once the server has seen them. A page
+    // refresh may reconnect, but it cannot replace an earlier slow/false/timeout
+    // start with a new attempt and then submit a better five-start history.
+    const authoritative = state.lightsOutAttempts?.[playerId] ?? [];
+    for (let i = 0; i < authoritative.length; i++) {
+      const attempt = authoritative[i];
+      if (attempt && Math.abs(rounds[i] - attempt.score) > 1) throw new Error('Lights Out history does not match the restored attempt.');
+    }
   }
   if (state.gameId === 'shrink-ring') {
     if (score > 300 || secondary > 54000) throw new Error('Invalid Shrink Ring score.');
@@ -3805,6 +3814,7 @@ function startPrecision(room: Room, court: Court, match: Match) {
     results: {},
     progress: {},
     ricochetRound: room.selectedGameId === 'ricochet' ? 0 : undefined,
+    lightsOutAttempts: room.selectedGameId === 'lights-out' ? {} : undefined,
   };
   broadcastRoom(room);
 
@@ -4925,11 +4935,28 @@ wss.on('connection', (ws) => {
         if (!live || !live.match.precision || live.match.status !== 'playing') throw new Error('That precision match is not active.');
         if (!live.match.playerIds.includes(ctx.playerId!)) throw new Error('You are not part of that match.');
         if (live.match.precision.phase !== 'playing' || live.match.precision.results[ctx.playerId!]) return;
-        live.match.precision.progress[ctx.playerId!] = {
-          round: Math.max(0, Math.min(20, Math.round(Number(msg.round) || 0))),
-          label: String(msg.label ?? '').slice(0, 40),
-          value: Number.isFinite(Number(msg.value)) ? Number(msg.value) : undefined,
-        };
+        const state = live.match.precision;
+        const playerId = ctx.playerId!;
+        const nextRound = Math.max(0, Math.min(20, Math.round(Number(msg.round) || 0)));
+        const previous = state.progress[playerId];
+        // Progress is monotonic. A stale/reloaded client can never rewind the
+        // authoritative stage shown to spectators or used for reconnect recovery.
+        if (previous && nextRound < previous.round) return;
+        let nextValue = Number.isFinite(Number(msg.value)) ? Number(msg.value) : undefined;
+        const label = String(msg.label ?? '').slice(0, 40);
+        if (state.gameId === 'lights-out' && nextRound >= 1 && nextRound <= 5 && typeof nextValue === 'number') {
+          nextValue = Math.max(0, Math.min(3000, Math.round(nextValue)));
+          state.lightsOutAttempts ??= {};
+          const attempts = state.lightsOutAttempts[playerId] ??= [];
+          const idx = nextRound - 1;
+          // First completion of a start wins. Retries/replays after reconnect do
+          // not get to overwrite an already recorded reaction. Keep the history
+          // sequential so a stale client cannot create sparse fake stages.
+          if (idx > attempts.length) return;
+          if (!attempts[idx]) attempts[idx] = { score: nextValue, label };
+          else nextValue = attempts[idx].score;
+        }
+        state.progress[playerId] = { round: nextRound, label, value: nextValue };
         broadcastRoom(room);
         return;
       }
