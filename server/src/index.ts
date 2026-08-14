@@ -351,8 +351,8 @@ type ClientMessage =
   | { type: 'prepare-matchups' }
   | { type: 'begin-matchups' }
   | { type: 'resolve-match'; matchId: string; winnerId: string }
-  | { type: 'precision-progress'; matchId: string; round: number; label: string; value?: number }
-  | { type: 'precision-result'; matchId: string; score: number; secondary?: number; display: string; rounds?: number[] }
+  | { type: 'precision-progress'; matchId: string; round: number; label: string; value?: number; precisionRound?: number }
+  | { type: 'precision-result'; matchId: string; score: number; secondary?: number; display: string; rounds?: number[]; precisionRound?: number }
   | { type: 'spectate-match'; matchId: string; povPlayerId?: string }
   | { type: 'stop-spectating' }
   | { type: 'spectator-frame'; matchId: string; sequence: number; capturedAt: number; html: string; canvases?: Array<{ index: number; width: number; height: number; dataUrl: string }> }
@@ -515,7 +515,12 @@ function forwardSpectatorFrame(room: Room, ws: WebSocket, msg: Extract<ClientMes
   }) : [];
   if (canvases.reduce((sum, canvas) => sum + canvas.dataUrl.length, 0) > 900_000) return;
   const frame = { matchId: live.match.id, playerId: ctx.playerId, html, canvases, sequence, capturedAt, serverReceivedAt: Date.now() };
-  for (const spectator of watchers) send(spectator, { type: 'spectator-frame', frame });
+  for (const spectator of watchers) {
+    // Live canvas frames must never starve room-state/heartbeat traffic. If a
+    // viewer is temporarily slow, drop that visual frame instead of queuing it.
+    if (spectator.bufferedAmount > 512_000) continue;
+    send(spectator, { type: 'spectator-frame', frame });
+  }
 }
 
 function getRoomFor(ws: WebSocket) {
@@ -3704,7 +3709,7 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
   const state = match.precision;
   if (!state || match.status !== 'playing' || state.phase !== 'playing') throw new Error('That precision match is not accepting results.');
   if (!match.playerIds.includes(playerId)) throw new Error('You are not part of that match.');
-  if (state.results[playerId]) return;
+  if (state.results[playerId]) {broadcastRoom(room);return;}
 
   const score = Number(raw.score);
   const secondary = Number(raw.secondary ?? 0);
@@ -4937,6 +4942,10 @@ wss.on('connection', (ws) => {
         if (live.match.precision.phase !== 'playing' || live.match.precision.results[ctx.playerId!]) return;
         const state = live.match.precision;
         const playerId = ctx.playerId!;
+        if (state.gameId === 'ricochet') {
+          const expectedRound = Math.max(0, Math.round(state.ricochetRound ?? 0));
+          if (!Number.isFinite(Number(msg.precisionRound)) || Math.max(0, Math.round(Number(msg.precisionRound))) !== expectedRound) return;
+        }
         const nextRound = Math.max(0, Math.min(20, Math.round(Number(msg.round) || 0)));
         const previous = state.progress[playerId];
         // Progress is monotonic. A stale/reloaded client can never rewind the
@@ -4968,6 +4977,13 @@ wss.on('connection', (ws) => {
         const live = findLiveMatch(room, String(msg.matchId));
         if (!live) throw new Error('That match is no longer active.');
         if (!isPrecisionGame(room.selectedGameId)) throw new Error('That result belongs to a different mini-game.');
+        if (live.match.precision?.gameId === 'ricochet') {
+          const expectedRound = Math.max(0, Math.round(live.match.precision.ricochetRound ?? 0));
+          if (!Number.isFinite(Number(msg.precisionRound)) || Math.max(0, Math.round(Number(msg.precisionRound))) !== expectedRound) {
+            broadcastRoom(room);
+            return;
+          }
+        }
         submitPrecisionResult(room, live.court, live.match, ctx.playerId!, msg);
         return;
       }
