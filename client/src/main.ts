@@ -225,15 +225,15 @@ class PrecisionController{
   async runLightsOut(){
     const stage=this.stage();if(!stage)return;const scores:number[]=[];stage.innerHTML=`<div class="lights-game"><div class="trial-label">START <span id="trial-no">1</span> / 5</div><div class="f1-lights">${Array.from({length:5},(_,i)=>`<div class="light-stack"><span class="red-light" data-light="${i}"></span><span class="red-light dim"></span></div>`).join('')}</div><div id="reaction-message" class="reaction-message">WAIT FOR LIGHTS OUT</div><button id="reaction-pad" class="reaction-pad">WAIT…<small>Tap here the instant the lights go out</small></button><div id="reaction-history" class="reaction-history"></div></div>`;
     const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
-    type TapResult={score:number;falseStart:boolean};
+    type TapResult={score:number;falseStart:boolean;timedOut?:boolean};
     const falseStartFlags:boolean[]=[];
     let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{},activeTrialToken=0;
     pad.addEventListener('pointerdown',e=>{
       e.preventDefault();
       if(phase==='waiting'){
-        phase='locked';resolveTap({score:1000,falseStart:true});sound.beep(180,.14);
+        phase='locked';resolveTap({score:1000,falseStart:true,timedOut:false});sound.beep(180,.14);
       }else if(phase==='go'){
-        phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap({score:rt,falseStart:false});sound.beep(820,.06);
+        phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap({score:rt,falseStart:false,timedOut:false});sound.beep(820,.06);
       }
     });
     await sleep(800);
@@ -254,7 +254,9 @@ class PrecisionController{
           if(this.destroyed||token!==activeTrialToken||phase!=='waiting')return;
           await new Promise<void>(r=>requestAnimationFrame(()=>{
             if(this.destroyed||token!==activeTrialToken||phase!=='waiting'){r();return;}
-            document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT</small>';msg.textContent='GO!';r();
+            document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT · 3 SECOND LIMIT</small>';msg.textContent='GO!';
+            const goToken=token;const goStartedAt=lightOutAt;
+            void (async()=>{await sleep(3000);if(this.destroyed||goToken!==activeTrialToken||phase!=='go'||lightOutAt!==goStartedAt)return;phase='locked';resolveTap({score:3000,falseStart:false,timedOut:true});sound.beep(145,.16);})();r();
           }));
         })();
       }
@@ -265,8 +267,8 @@ class PrecisionController{
       if(token===activeTrialToken)activeTrialToken++;
       phase='locked';document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go');
       const reaction=Math.round(tap.score);scores.push(reaction);falseStartFlags.push(tap.falseStart);
-      if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
-      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':'REACTION',reaction);await sleep(900);phase='intro';
+      if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else if(tap.timedOut){msg.textContent='TIME OUT · 3.000 SECONDS';pad.classList.add('false');pad.innerHTML='TIME OUT<small>No tap within 3 seconds · attempt ends</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
+      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':v>=3000?'TIME':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':tap.timedOut?'TIME OUT':'REACTION',reaction);await sleep(900);phase='intro';
     }
     if(this.destroyed)return;const med=median(scores),falseStarts=falseStartFlags.filter(Boolean).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
   }
