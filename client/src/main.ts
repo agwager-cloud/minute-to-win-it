@@ -213,64 +213,101 @@ class MinuteApp{
 class PrecisionController{
   app:MinuteApp; matchId:string; state:PrecisionState; game:GameDefinition; running=false; destroyed=false; timers:number[]=[]; raf?:number; private spectatorTimer?:number; private spectatorSequence=0;
   constructor(app:MinuteApp,match:MatchState,state:PrecisionState,game:GameDefinition){this.app=app;this.matchId=match.id;this.state=state;this.game=game;}
-  start(){this.running=true;this.setSpectatorStreaming(this.app.isSpectatorStreamRequested(this.matchId));if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();}
+  start(){
+    this.running=true;this.setSpectatorStreaming(this.app.isSpectatorStreamRequested(this.matchId));
+    // A precision controller is normally created once per active attempt. If
+    // the same match is created again because the page was refreshed (or the
+    // host navigated away and back), never give the player a fresh attempt.
+    // Lights Out has full per-start restoration below. Other games preserve the
+    // last server-visible score/stage and convert the unfinished remainder to
+    // automatic timeouts/zeroes, so refreshing can never improve a losing run.
+    const saved=this.loadResume<Record<string,unknown>>();
+    const finalResult=saved?.finalResult as {score?:number;secondary?:number;display?:string;rounds?:number[]}|undefined;
+    if(saved?.submitted&&finalResult&&Array.isArray(finalResult.rounds)){
+      const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT RESTORED</h2><p>Re-sending your completed attempt — refresh cannot start it again.</p><div class="spinner"></div></div>`;
+      this.app.net.send({type:'precision-result',matchId:this.matchId,score:Number(finalResult.score||0),secondary:Number(finalResult.secondary||0),display:String(finalResult.display||'restored result'),rounds:finalResult.rounds});return;
+    }
+    if(this.game.id!=='lights-out'&&saved?.started){void this.recoverInterruptedPrecision(saved);return;}
+    if(this.game.id!=='lights-out')this.saveResume({started:true});
+    if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();
+  }
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
   setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),100);}
   private publishSpectatorFrame(){if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;const canvases=[...stage.querySelectorAll<HTMLCanvasElement>('canvas')].slice(0,3).map((canvas,index)=>{let dataUrl='';try{dataUrl=canvas.toDataURL('image/webp',.72);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png')}catch{}return{index,width:canvas.width,height:canvas.height,dataUrl}}).filter(c=>c.dataUrl);this.app.net.send({type:'spectator-frame',matchId:this.matchId,sequence:++this.spectatorSequence,capturedAt:Date.now(),html:stage.innerHTML,canvases});}
 
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
-  sendProgress(round:number,label:string,value?:number){this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value});}
-  sendResult(score:number,secondary:number,display:string,rounds:number[]){this.running=false;this.app.net.send({type:'precision-result',matchId:this.matchId,score,secondary,display,rounds});const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT SUBMITTED</h2><p>Waiting for your opponent to finish…</p><div class="spinner"></div></div>`;}
+  sendProgress(round:number,label:string,value?:number){this.saveResume({lastProgress:{round,label,value}});this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value});}
+  private resumeKey(){return `mtwi-precision-resume-v1:${this.matchId}:${this.app.session?.playerId||'unknown'}`;}
+  private loadResume<T extends Record<string,unknown>>():T|undefined{try{const raw=sessionStorage.getItem(this.resumeKey());if(!raw)return undefined;const parsed=JSON.parse(raw) as {gameId?:string;seed?:number;data?:T};if(parsed.gameId!==this.game.id||parsed.seed!==this.state.seed)return undefined;return parsed.data;}catch{return undefined}}
+  private saveResume(data:Record<string,unknown>){try{const previous=this.loadResume<Record<string,unknown>>()||{};sessionStorage.setItem(this.resumeKey(),JSON.stringify({gameId:this.game.id,seed:this.state.seed,data:{...previous,...data},updatedAt:Date.now()}));}catch{}}
+  private clearResume(){try{sessionStorage.removeItem(this.resumeKey())}catch{}}
+  private synthesizeRounds(total:number,count:number,maxPerRound=100){const out:number[]=[];let left=Math.max(0,Math.round(total));for(let i=0;i<count;i++){const slots=count-i;const value=Math.max(0,Math.min(maxPerRound,Math.round(left/slots)));out.push(value);left-=value;}if(out.length&&left)out[out.length-1]=Math.max(0,Math.min(maxPerRound,out[out.length-1]+left));return out;}
+  private async recoverInterruptedPrecision(saved:Record<string,unknown>){
+    const stage=this.stage();if(!stage)return;const me=this.app.session?.playerId||'';const serverProgress=this.state.progress?.[me];const local=saved.lastProgress as {round?:number;label?:string;value?:number}|undefined;const progress=(serverProgress?.round||0)>=(local?.round||0)?serverProgress:local;const completed=Math.max(0,Number(progress?.round||0));const value=Math.max(0,Number(progress?.value||0));
+    stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>ATTEMPT RESTORED</h2><p>Refresh detected at stage ${Math.max(1,completed+1)}. Completed progress is preserved; unfinished stages are timed out so the attempt cannot be restarted.</p><div class="spinner"></div></div>`;
+    await sleep(650);if(this.destroyed)return;
+    const high:{[key:string]:{rounds:number;max:number;secondary:number;display:string}}={
+      'shrink-ring':{rounds:3,max:100,secondary:54000,display:'/ 300 pts'},'parry':{rounds:10,max:100,secondary:30000,display:'/ 1000 pts'},'overpour':{rounds:5,max:100,secondary:50000,display:'/ 500 pts'},'charge-shot':{rounds:5,max:100,secondary:50000,display:'/ 500 pts'},'stack':{rounds:8,max:100,secondary:10000,display:'/ 800 pts'},'trace':{rounds:3,max:100,secondary:50000,display:'/ 300 pts'},'knife-wheel':{rounds:10,max:100,secondary:100000,display:'/ 1000 pts'},'conveyor-chef':{rounds:10,max:100,secondary:20000,display:'/ 1000 pts'},'pole-balance':{rounds:10,max:100,secondary:100000,display:'/ 1000 pts'},'fuse':{rounds:10,max:100,secondary:20000,display:'/ 1000 pts'}
+    };
+    if(this.game.id==='blind-beat'){const restored=completed>=8&&String(progress?.label||'')==='FINISHED'?Math.max(0,Math.min(750,Math.round(value))):750,rounds=Array.from({length:16},()=>restored);this.sendResult(restored,restored,`${restored} ms avg · ${restored===750?'refresh timeout':'restored finish'}`,rounds);return;}
+    if(this.game.id==='time-stop'){const kept=Math.min(3,completed),prefix=this.synthesizeRounds(value,kept,20000),rounds=[...prefix,...Array.from({length:3-prefix.length},()=>20000)],score=rounds.reduce((a,b)=>a+b,0),secondary=Math.max(...rounds);this.sendResult(score,secondary,`${(score/1000).toFixed(2)} s total error · refresh timeout`,rounds);return;}
+    if(this.game.id==='ricochet'){const score=completed>=1?Math.max(0,Math.min(1000,Math.round(value))):0;this.sendResult(score,100000,`${score} / 1000 pts · refresh ended shot`,[score]);return;}
+    const spec=high[this.game.id];if(spec){const kept=Math.min(spec.rounds,completed),prefix=this.synthesizeRounds(value,kept,spec.max),rounds=[...prefix,...Array.from({length:spec.rounds-prefix.length},()=>0)],score=rounds.reduce((a,b)=>a+b,0);this.sendResult(score,spec.secondary,`${score} ${spec.display} · refresh timeout`,rounds);return;}
+    this.clearResume();
+  }
+  sendResult(score:number,secondary:number,display:string,rounds:number[]){this.running=false;this.saveResume({submitted:true,finalResult:{score,secondary,display,rounds}});this.app.net.send({type:'precision-result',matchId:this.matchId,score,secondary,display,rounds});const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT SUBMITTED</h2><p>Waiting for your opponent to finish…</p><div class="spinner"></div></div>`;}
   async runLightsOut(){
-    const stage=this.stage();if(!stage)return;const scores:number[]=[];stage.innerHTML=`<div class="lights-game"><div class="trial-label">START <span id="trial-no">1</span> / 5</div><div class="f1-lights">${Array.from({length:5},(_,i)=>`<div class="light-stack"><span class="red-light" data-light="${i}"></span><span class="red-light dim"></span></div>`).join('')}</div><div id="reaction-message" class="reaction-message">WAIT FOR LIGHTS OUT</div><button id="reaction-pad" class="reaction-pad">WAIT…<small>Tap here the instant the lights go out</small></button><div id="reaction-history" class="reaction-history"></div></div>`;
-    const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
+    const stage=this.stage();if(!stage)return;
     type TapResult={score:number;falseStart:boolean;timedOut?:boolean};
-    const falseStartFlags:boolean[]=[];
-    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{},activeTrialToken=0;
+    type Resume={scores:number[];falseStartFlags:boolean[];timedOutFlags:boolean[];inTrial:boolean};
+    const saved=this.loadResume<Resume>();
+    const myId=this.app.session?.playerId||'',serverAttempts=(this.state.lightsOutAttempts?.[myId]||[]).filter((a):a is {score:number;label:string}=>Boolean(a&&Number.isFinite(a.score)));
+    const savedScores=[...(saved?.scores||[])].slice(0,5),useServer=serverAttempts.length>savedScores.length;
+    const scores:number[]=(useServer?serverAttempts.map(a=>a.score):savedScores).slice(0,5);
+    const falseStartFlags:boolean[]=(useServer?serverAttempts.map(a=>a.label==='FALSE START'):[...(saved?.falseStartFlags||[])]).slice(0,scores.length);
+    const timedOutFlags:boolean[]=(useServer?serverAttempts.map(a=>a.label==='TIME OUT'):[...(saved?.timedOutFlags||[])]).slice(0,scores.length);
+    // Refreshing during an active start must never grant another attempt. Only
+    // add the interrupted-start timeout when the server has not already recorded
+    // that start; otherwise the authoritative server history wins.
+    let restoredTimeoutRound=0;if(saved?.inTrial&&scores.length<5&&serverAttempts.length<=savedScores.length){scores.push(3000);falseStartFlags.push(false);timedOutFlags.push(true);restoredTimeoutRound=scores.length;}
+    this.saveResume({scores,falseStartFlags,timedOutFlags,inTrial:false});
+    stage.innerHTML=`<div class="lights-game"><div class="trial-label">START <span id="trial-no">${Math.min(5,scores.length+1)}</span> / 5</div><div class="f1-lights">${Array.from({length:5},(_,i)=>`<div class="light-stack"><span class="red-light" data-light="${i}"></span><span class="red-light dim"></span></div>`).join('')}</div><div id="reaction-message" class="reaction-message">${scores.length?'ATTEMPT RESTORED':'WAIT FOR LIGHTS OUT'}</div><button id="reaction-pad" class="reaction-pad">WAIT…<small>Tap here the instant the lights go out</small></button><div id="reaction-history" class="reaction-history"></div></div>`;
+    const pad=document.querySelector<HTMLButtonElement>('#reaction-pad')!,msg=document.querySelector<HTMLElement>('#reaction-message')!,trialEl=document.querySelector<HTMLElement>('#trial-no')!,history=document.querySelector<HTMLElement>('#reaction-history')!;
+    const drawHistory=()=>history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':timedOutFlags[i]||v>=3000?'TIME':(v/1000).toFixed(3)}</span>`).join('');drawHistory();if(restoredTimeoutRound)this.sendProgress(restoredTimeoutRound,'TIME OUT',3000);
+    let phase:'intro'|'waiting'|'go'|'locked'='intro',lightOutAt=0,resolveTap:(v:TapResult)=>void=()=>{},activeTrialToken=0,goTimeoutId=0;
     pad.addEventListener('pointerdown',e=>{
       e.preventDefault();
       if(phase==='waiting'){
-        phase='locked';resolveTap({score:1000,falseStart:true,timedOut:false});sound.beep(180,.14);
+        phase='locked';if(goTimeoutId)clearTimeout(goTimeoutId);resolveTap({score:1000,falseStart:true,timedOut:false});sound.beep(180,.14);
       }else if(phase==='go'){
-        phase='locked';const rt=Math.max(0,performance.now()-lightOutAt);resolveTap({score:rt,falseStart:false,timedOut:false});sound.beep(820,.06);
+        phase='locked';if(goTimeoutId)clearTimeout(goTimeoutId);const rt=Math.max(0,performance.now()-lightOutAt);
+        // Belt-and-braces guard: even if a browser delays a timer callback, a
+        // tap at or after 3 seconds is still a TIME OUT, never a 10–20 s score.
+        if(rt>=3000){resolveTap({score:3000,falseStart:false,timedOut:true});sound.beep(145,.16);}else{resolveTap({score:rt,falseStart:false,timedOut:false});sound.beep(820,.06);}
       }
     });
-    await sleep(800);
-    for(let trial=0;trial<5&&!this.destroyed;trial++){
-      const token=++activeTrialToken;
-      let trialResolved=false;
-      const resultPromise=new Promise<TapResult>(resolve=>{resolveTap=(value)=>{if(trialResolved||token!==activeTrialToken)return;trialResolved=true;resolve(value);};});
+    await sleep(scores.length?250:800);
+    for(let trial=scores.length;trial<5&&!this.destroyed;trial++){
+      const token=++activeTrialToken;let trialResolved=false;
+      const resultPromise=new Promise<TapResult>(resolve=>{resolveTap=(value)=>{if(trialResolved||token!==activeTrialToken)return;trialResolved=true;if(goTimeoutId){clearTimeout(goTimeoutId);goTimeoutId=0;}resolve(value);};});
+      this.saveResume({scores,falseStartFlags,timedOutFlags,inTrial:true});
       trialEl.textContent=String(trial+1);document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go','false');pad.innerHTML='WAIT…<small>Do not anticipate</small>';msg.textContent='LIGHTS BUILDING';phase='waiting';
-      for(let i=0;i<5;i++){
-        await sleep(300);if(this.destroyed)return;
-        if(token!==activeTrialToken||phase!=='waiting')break;
-        document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);
-      }
+      for(let i=0;i<5;i++){await sleep(300);if(this.destroyed)return;if(token!==activeTrialToken||phase!=='waiting')break;document.querySelector(`.red-light[data-light="${i}"]`)?.classList.add('lit');sound.beep(260+i*35,.035);}
       if(token===activeTrialToken&&phase==='waiting'){
         const delay=650+seededUnit(this.state.seed,trial)*1800;
-        void (async()=>{
-          await sleep(delay);
-          if(this.destroyed||token!==activeTrialToken||phase!=='waiting')return;
-          await new Promise<void>(r=>requestAnimationFrame(()=>{
-            if(this.destroyed||token!==activeTrialToken||phase!=='waiting'){r();return;}
-            document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT · 3 SECOND LIMIT</small>';msg.textContent='GO!';
-            const goToken=token;const goStartedAt=lightOutAt;
-            void (async()=>{await sleep(3000);if(this.destroyed||goToken!==activeTrialToken||phase!=='go'||lightOutAt!==goStartedAt)return;phase='locked';resolveTap({score:3000,falseStart:false,timedOut:true});sound.beep(145,.16);})();r();
-          }));
-        })();
+        void (async()=>{await sleep(delay);if(this.destroyed||token!==activeTrialToken||phase!=='waiting')return;await new Promise<void>(r=>requestAnimationFrame(()=>{
+          if(this.destroyed||token!==activeTrialToken||phase!=='waiting'){r();return;}
+          document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));lightOutAt=performance.now();phase='go';pad.classList.add('go');pad.innerHTML='TAP!<small>LIGHTS OUT · 3 SECOND LIMIT</small>';msg.textContent='GO!';
+          goTimeoutId=window.setTimeout(()=>{if(this.destroyed||trialResolved||token!==activeTrialToken||phase!=='go')return;phase='locked';resolveTap({score:3000,falseStart:false,timedOut:true});sound.beep(145,.16);},3000);this.timers.push(goTimeoutId);r();
+        }));})();
       }
-      const tap=await resultPromise;if(this.destroyed)return;
-      // Invalidate every delayed action owned by this trial BEFORE feedback or the
-      // next trial starts. A stale random-delay task can therefore never turn a
-      // later three-light build into GO! after a spammed false start.
-      if(token===activeTrialToken)activeTrialToken++;
-      phase='locked';document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go');
-      const reaction=Math.round(tap.score);scores.push(reaction);falseStartFlags.push(tap.falseStart);
+      const tap=await resultPromise;if(this.destroyed)return;if(token===activeTrialToken)activeTrialToken++;phase='locked';document.querySelectorAll('.red-light[data-light]').forEach(el=>el.classList.remove('lit'));pad.classList.remove('go');
+      const reaction=Math.min(3000,Math.round(tap.score));scores.push(reaction);falseStartFlags.push(tap.falseStart);timedOutFlags.push(Boolean(tap.timedOut));this.saveResume({scores,falseStartFlags,timedOutFlags,inTrial:false});
       if(tap.falseStart){msg.textContent='FALSE START';pad.classList.add('false');pad.innerHTML='FALSE START<small>This attempt scores 1.000 s</small>';}else if(tap.timedOut){msg.textContent='TIME OUT · 3.000 SECONDS';pad.classList.add('false');pad.innerHTML='TIME OUT<small>No tap within 3 seconds · attempt ends</small>';}else{msg.textContent=`${(reaction/1000).toFixed(3)} SECONDS`;pad.innerHTML=`${(reaction/1000).toFixed(3)} s<small>${reaction<220?'PERFECT':reaction<280?'GREAT':reaction<360?'GOOD':'REACTION RECORDED'}</small>`;}
-      history.innerHTML=scores.map((v,i)=>`<span>${i+1}: ${falseStartFlags[i]?'FALSE':v>=3000?'TIME':(v/1000).toFixed(3)}</span>`).join('');this.sendProgress(trial+1,tap.falseStart?'FALSE START':tap.timedOut?'TIME OUT':'REACTION',reaction);await sleep(900);phase='intro';
+      drawHistory();this.sendProgress(trial+1,tap.falseStart?'FALSE START':tap.timedOut?'TIME OUT':'REACTION',reaction);await sleep(900);phase='intro';
     }
-    if(this.destroyed)return;const med=median(scores),falseStarts=falseStartFlags.filter(Boolean).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length);this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}`,scores);
+    if(this.destroyed)return;const med=median(scores),falseStarts=falseStartFlags.filter(Boolean).length,avg=Math.round(scores.reduce((a,b)=>a+b,0)/scores.length),timeouts=timedOutFlags.filter(Boolean).length;this.sendResult(med,avg,`${(med/1000).toFixed(3)} s median${falseStarts?` · ${falseStarts} false start${falseStarts===1?'':'s'}`:''}${timeouts?` · ${timeouts} timeout${timeouts===1?'':'s'}`:''}`,scores);
   }
   async runShrinkRing(){
     const stage=this.stage();if(!stage)return;
@@ -1108,7 +1145,7 @@ class PrecisionController{
       roundEl.textContent=String(i+1);targetEl.textContent=targets[i].toFixed(2);clock.textContent='GET READY';pad.classList.remove('stop','timeout');pad.innerHTML='3<small>Starts automatically</small>';
       const countdownOk=await beginCountdown();if(!countdownOk||this.destroyed)return;
       let timeoutId=0;const stopped=await new Promise<{elapsedMs:number;timedOut:boolean}>(r=>{resolveStop=r;timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolveStop({elapsedMs:20000,timedOut:true});},20000);this.timers.push(timeoutId)});clearTimeout(timeoutId);if(this.destroyed)return;if(this.raf)cancelAnimationFrame(this.raf);
-      const measured=Math.round((stopped.elapsedMs/1000)*100)/100;const err=Math.round(Math.abs(measured-targets[i])*1000);errors.push(err);timedOutRounds.push(stopped.timedOut);clock.textContent=stopped.timedOut?'TIME OUT':`${measured.toFixed(2)} s`;pad.classList.remove('stop');if(stopped.timedOut)pad.classList.add('timeout');pad.innerHTML=stopped.timedOut?`TIME OUT<small>Scored as 20.00 s · next target loading</small>`:`ERROR ${(err/1000).toFixed(2)} s<small>Target ${targets[i].toFixed(2)} s</small>`;history.innerHTML=errors.map((v,j)=>`<span class="${timedOutRounds[j]?'timed-out':''}">${j+1}: ${timedOutRounds[j]?'TIME OUT ':''}+${(v/1000).toFixed(2)} s</span>`).join('');this.sendProgress(i+1,stopped.timedOut?'TIME OUT':'TIMING ERROR',err);sound.beep(stopped.timedOut?180:err<=30?900:err<=100?650:420,.08);await sleep(1200);
+      const measured=Math.round((stopped.elapsedMs/1000)*100)/100;const err=Math.round(Math.abs(measured-targets[i])*1000);errors.push(err);timedOutRounds.push(stopped.timedOut);clock.textContent=stopped.timedOut?'TIME OUT':`${measured.toFixed(2)} s`;pad.classList.remove('stop');if(stopped.timedOut)pad.classList.add('timeout');pad.innerHTML=stopped.timedOut?`TIME OUT<small>Scored as 20.00 s · next target loading</small>`:`ERROR ${(err/1000).toFixed(2)} s<small>Target ${targets[i].toFixed(2)} s</small>`;history.innerHTML=errors.map((v,j)=>`<span class="${timedOutRounds[j]?'timed-out':''}">${j+1}: ${timedOutRounds[j]?'TIME OUT ':''}+${(v/1000).toFixed(2)} s</span>`).join('');this.sendProgress(i+1,stopped.timedOut?'TIME OUT':'TIMING ERROR',errors.reduce((a,b)=>a+b,0));sound.beep(stopped.timedOut?180:err<=30?900:err<=100?650:420,.08);await sleep(1200);
     }
     if(this.destroyed)return;const total=errors.reduce((a,b)=>a+b,0),worst=Math.max(...errors),timeouts=timedOutRounds.filter(Boolean).length;this.sendResult(total,worst,`${(total/1000).toFixed(2)} s total error${timeouts?` · ${timeouts} timeout${timeouts===1?'':'s'}`:''}`,errors);
   }

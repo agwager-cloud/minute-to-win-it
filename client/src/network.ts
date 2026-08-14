@@ -5,6 +5,7 @@ export type PrecisionState = {
   phase:'playing'|'results'; gameId:string; seed:number; targets?:number[];
   results:Record<string,PrecisionResult>; progress:Record<string,PrecisionProgress>;
   winnerId?:string; resultRevealAt?:number; ricochetRound?:number;
+  lightsOutAttempts?:Record<string,Array<{score:number;label:string}>>;
 };
 export type MatchState = {
   id:string; courtIndex:number; playerIds:[string,string]; status:'ready'|'countdown'|'playing'|'complete';
