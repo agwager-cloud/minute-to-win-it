@@ -41,24 +41,35 @@ new Phaser.Game({type:Phaser.AUTO,width:DESIGN_W,height:DESIGN_H,parent:'phaser-
 class SoundBank{
   enabled=localStorage.getItem('mtwi-sound')!=='off';
   music=new Audio('./audio/alex-morgan-video-game-pixel-chiptune-music-583271.mp3');
+  private audioCtx?:AudioContext;
   constructor(){
     this.music.loop=true;
     this.music.preload='auto';
     this.music.volume=.22;
-    const unlock=()=>{if(this.enabled)this.playMusic();};
+    const unlock=()=>{if(this.enabled){this.playMusic();this.resumeAudioContext();}};
     window.addEventListener('pointerdown',unlock,{capture:true});
     window.addEventListener('keydown',unlock,{capture:true});
-    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&this.enabled)this.playMusic();});
+    document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='visible'&&this.enabled){this.playMusic();this.resumeAudioContext();}});
     if(this.enabled)this.playMusic();
   }
   private playMusic(){if(!this.enabled)return;void this.music.play().catch(()=>{});}
+  private getAudioContext(){
+    try{
+      if(!this.audioCtx||this.audioCtx.state==='closed'){const C=(window.AudioContext||(window as any).webkitAudioContext) as typeof AudioContext|undefined;if(!C)return undefined;this.audioCtx=new C();}
+      return this.audioCtx;
+    }catch{return undefined;}
+  }
+  private resumeAudioContext(){const ctx=this.getAudioContext();if(ctx?.state==='suspended')void ctx.resume().catch(()=>{});}
   toggle(){
     this.enabled=!this.enabled;
     localStorage.setItem('mtwi-sound',this.enabled?'on':'off');
-    if(this.enabled)this.playMusic();else this.music.pause();
+    if(this.enabled){this.playMusic();this.resumeAudioContext();}else this.music.pause();
     return this.enabled;
   }
-  beep(freq=520,duration=.06){if(!this.enabled)return;try{const C=(window.AudioContext||(window as any).webkitAudioContext);const ctx=new C();const o=ctx.createOscillator(),gain=ctx.createGain();o.frequency.value=freq;gain.gain.value=.045;o.connect(gain);gain.connect(ctx.destination);o.start();gain.gain.exponentialRampToValueAtTime(.0001,ctx.currentTime+duration);o.stop(ctx.currentTime+duration+.01);}catch{}}
+  beep(freq=520,duration=.06){
+    if(!this.enabled)return;const ctx=this.getAudioContext();if(!ctx)return;if(ctx.state==='suspended')void ctx.resume().catch(()=>{});
+    try{const o=ctx.createOscillator(),gain=ctx.createGain(),now=ctx.currentTime;o.frequency.value=freq;gain.gain.setValueAtTime(.045,now);gain.gain.exponentialRampToValueAtTime(.0001,now+duration);o.connect(gain);gain.connect(ctx.destination);o.onended=()=>{try{o.disconnect();gain.disconnect();}catch{}};o.start(now);o.stop(now+duration+.01);}catch{}
+  }
 }
 const sound=new SoundBank();
 
@@ -224,24 +235,41 @@ class PrecisionController{
     const saved=this.loadResume<Record<string,unknown>>();
     const finalResult=saved?.finalResult as {score?:number;secondary?:number;display?:string;rounds?:number[]}|undefined;
     if(saved?.submitted&&finalResult&&Array.isArray(finalResult.rounds)){
-      const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT RESTORED</h2><p>Re-sending your completed attempt — refresh cannot start it again.</p><div class="spinner"></div></div>`;
-      this.app.net.send({type:'precision-result',matchId:this.matchId,score:Number(finalResult.score||0),secondary:Number(finalResult.secondary||0),display:String(finalResult.display||'restored result'),rounds:finalResult.rounds});return;
+      const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT RESTORING</h2><p>Your completed attempt is being confirmed with the server. It cannot be replayed.</p><div class="spinner"></div></div>`;
+      this.app.net.send({type:'precision-result',matchId:this.matchId,score:Number(finalResult.score||0),secondary:Number(finalResult.secondary||0),display:String(finalResult.display||'restored result'),rounds:finalResult.rounds,precisionRound:this.game.id==='ricochet'?Math.max(0,Math.round(this.state.ricochetRound??0)):undefined});return;
     }
     if(this.game.id!=='lights-out'&&saved?.started){void this.recoverInterruptedPrecision(saved);return;}
     if(this.game.id!=='lights-out')this.saveResume({started:true});
     if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();
   }
   destroy(){this.destroyed=true;this.running=false;this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
-  setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),100);}
-  private publishSpectatorFrame(){if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;const canvases=[...stage.querySelectorAll<HTMLCanvasElement>('canvas')].slice(0,3).map((canvas,index)=>{let dataUrl='';try{dataUrl=canvas.toDataURL('image/webp',.72);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png')}catch{}return{index,width:canvas.width,height:canvas.height,dataUrl}}).filter(c=>c.dataUrl);this.app.net.send({type:'spectator-frame',matchId:this.matchId,sequence:++this.spectatorSequence,capturedAt:Date.now(),html:stage.innerHTML,canvases});}
+  setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),120);}
+  private publishSpectatorFrame(){
+    if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;
+    const canvases=[...stage.querySelectorAll<HTMLCanvasElement>('canvas')].slice(0,3).map((canvas,index)=>{
+      let dataUrl='';let width=canvas.width,height=canvas.height;
+      try{
+        // Canvas mini-games used to send full DPR-sized base64 frames ten times
+        // per second. That could flood the same WebSocket used by gameplay and
+        // heartbeat traffic. Downscale only the transport copy; spectators still
+        // see the exact live player rendering, just compressed for delivery.
+        const maxW=960,maxH=540,scale=Math.min(1,maxW/Math.max(1,width),maxH/Math.max(1,height));
+        if(scale<.999){const copy=document.createElement('canvas');copy.width=Math.max(1,Math.round(width*scale));copy.height=Math.max(1,Math.round(height*scale));copy.getContext('2d')?.drawImage(canvas,0,0,copy.width,copy.height);width=copy.width;height=copy.height;dataUrl=copy.toDataURL('image/webp',.52);if(!dataUrl.startsWith('data:image/webp'))dataUrl=copy.toDataURL('image/png');}
+        else{dataUrl=canvas.toDataURL('image/webp',.52);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png');}
+      }catch{}
+      return{index,width,height,dataUrl};
+    }).filter(c=>c.dataUrl);
+    this.app.net.sendSpectatorFrame({type:'spectator-frame',matchId:this.matchId,sequence:++this.spectatorSequence,capturedAt:Date.now(),html:stage.innerHTML,canvases});
+  }
 
   sync(_room:RoomState,match:MatchState){if(match.precision)this.state=match.precision;}
   stage(){return document.querySelector<HTMLElement>('#precision-stage')}
-  sendProgress(round:number,label:string,value?:number){this.saveResume({lastProgress:{round,label,value}});this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value});}
-  private resumeKey(){return `mtwi-precision-resume-v1:${this.matchId}:${this.app.session?.playerId||'unknown'}`;}
-  private loadResume<T extends Record<string,unknown>>():T|undefined{try{const raw=sessionStorage.getItem(this.resumeKey());if(!raw)return undefined;const parsed=JSON.parse(raw) as {gameId?:string;seed?:number;data?:T};if(parsed.gameId!==this.game.id||parsed.seed!==this.state.seed)return undefined;return parsed.data;}catch{return undefined}}
+  sendProgress(round:number,label:string,value?:number){this.saveResume({lastProgress:{round,label,value}});this.app.net.send({type:'precision-progress',matchId:this.matchId,round,label,value,precisionRound:this.game.id==='ricochet'?Math.max(0,Math.round(this.state.ricochetRound??0)):undefined});}
+  private legacyResumeKey(){return `mtwi-precision-resume-v1:${this.matchId}:${this.app.session?.playerId||'unknown'}`;}
+  private resumeKey(){const base=this.legacyResumeKey();return this.game.id==='ricochet'?`${base}:ricochet-${Math.max(0,Math.round(this.state.ricochetRound??0))}`:base;}
+  private loadResume<T extends Record<string,unknown>>():T|undefined{try{const current=this.resumeKey();let raw=sessionStorage.getItem(current);if(!raw&&this.game.id==='ricochet'&&Math.max(0,Math.round(this.state.ricochetRound??0))===0){raw=sessionStorage.getItem(this.legacyResumeKey());if(raw)sessionStorage.setItem(current,raw);}if(!raw)return undefined;const parsed=JSON.parse(raw) as {gameId?:string;seed?:number;data?:T};if(parsed.gameId!==this.game.id||parsed.seed!==this.state.seed)return undefined;return parsed.data;}catch{return undefined}}
   private saveResume(data:Record<string,unknown>){try{const previous=this.loadResume<Record<string,unknown>>()||{};sessionStorage.setItem(this.resumeKey(),JSON.stringify({gameId:this.game.id,seed:this.state.seed,data:{...previous,...data},updatedAt:Date.now()}));}catch{}}
-  private clearResume(){try{sessionStorage.removeItem(this.resumeKey())}catch{}}
+  private clearResume(){try{sessionStorage.removeItem(this.resumeKey());if(this.game.id==='ricochet'&&Math.max(0,Math.round(this.state.ricochetRound??0))===0)sessionStorage.removeItem(this.legacyResumeKey())}catch{}}
   private synthesizeRounds(total:number,count:number,maxPerRound=100){const out:number[]=[];let left=Math.max(0,Math.round(total));for(let i=0;i<count;i++){const slots=count-i;const value=Math.max(0,Math.min(maxPerRound,Math.round(left/slots)));out.push(value);left-=value;}if(out.length&&left)out[out.length-1]=Math.max(0,Math.min(maxPerRound,out[out.length-1]+left));return out;}
   private async recoverInterruptedPrecision(saved:Record<string,unknown>){
     const stage=this.stage();if(!stage)return;const me=this.app.session?.playerId||'';const serverProgress=this.state.progress?.[me];const local=saved.lastProgress as {round?:number;label?:string;value?:number}|undefined;const progress=(serverProgress?.round||0)>=(local?.round||0)?serverProgress:local;const completed=Math.max(0,Number(progress?.round||0));const value=Math.max(0,Number(progress?.value||0));
@@ -256,7 +284,7 @@ class PrecisionController{
     const spec=high[this.game.id];if(spec){const kept=Math.min(spec.rounds,completed),prefix=this.synthesizeRounds(value,kept,spec.max),rounds=[...prefix,...Array.from({length:spec.rounds-prefix.length},()=>0)],score=rounds.reduce((a,b)=>a+b,0);this.sendResult(score,spec.secondary,`${score} ${spec.display} · refresh timeout`,rounds);return;}
     this.clearResume();
   }
-  sendResult(score:number,secondary:number,display:string,rounds:number[]){this.running=false;this.saveResume({submitted:true,finalResult:{score,secondary,display,rounds}});this.app.net.send({type:'precision-result',matchId:this.matchId,score,secondary,display,rounds});const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT SUBMITTED</h2><p>Waiting for your opponent to finish…</p><div class="spinner"></div></div>`;}
+  sendResult(score:number,secondary:number,display:string,rounds:number[]){this.running=false;this.saveResume({submitted:true,finalResult:{score,secondary,display,rounds}});this.app.net.send({type:'precision-result',matchId:this.matchId,score,secondary,display,rounds,precisionRound:this.game.id==='ricochet'?Math.max(0,Math.round(this.state.ricochetRound??0)):undefined});const stage=this.stage();if(stage)stage.innerHTML=`<div class="watcher"><div class="watch-symbol">${this.game.symbol}</div><h2>RESULT SUBMITTED</h2><p>Waiting for your opponent to finish…</p><div class="spinner"></div></div>`;}
   async runLightsOut(){
     const stage=this.stage();if(!stage)return;
     type TapResult={score:number;falseStart:boolean;timedOut?:boolean};

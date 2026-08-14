@@ -97,6 +97,13 @@ export class NetworkClient {
    */
   repairRoomSession(){if(this.stopped||!this.session)return;this.retryDelay=150;this.restart('Your room presence became out of sync. Rejoining automatically…');}
   send(payload:unknown){if(!this.isOnline()){this.events.onError('Still connecting to the server. Minute to Win It will keep retrying automatically.');return;}this.ws!.send(JSON.stringify(payload));}
+  sendSpectatorFrame(payload:unknown){
+    const s=this.ws;if(!this.connected||!s||s.readyState!==WebSocket.OPEN)return false;
+    // Spectator video is expendable; gameplay results, heartbeats and reconnect
+    // traffic are not. Never let image frames build an unbounded socket queue.
+    if(s.bufferedAmount>256_000)return false;
+    try{s.send(JSON.stringify(payload));return true}catch{return false}
+  }
   hostRoom(name:string){this.send({type:'host-room',name,deviceId:this.deviceId});}
   joinRoom(name:string,roomCode:string){this.send({type:'join-room',name,roomCode,deviceId:this.deviceId});}
   hostLogout(){this.send({type:'host-logout'});}
