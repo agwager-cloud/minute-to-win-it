@@ -3712,6 +3712,10 @@ function submitPrecisionResult(room: Room, court: Court, match: Match, playerId:
   const rounds = Array.isArray(raw.rounds)
     ? raw.rounds.slice(0, 20).map((value: unknown) => Number(value)).filter((value: number) => Number.isFinite(value) && value >= 0 && value <= 120000)
     : [];
+  if (state.gameId === 'lights-out') {
+    if (score > 3000 || secondary > 3000) throw new Error('Invalid Lights Out score.');
+    if (rounds.length !== 5 || rounds.some((value: number) => value > 3000)) throw new Error('Invalid Lights Out reaction data.');
+  }
   if (state.gameId === 'shrink-ring') {
     if (score > 300 || secondary > 54000) throw new Error('Invalid Shrink Ring score.');
     if (rounds.length !== 3 || rounds.some((value: number) => value > 100)) throw new Error('Invalid Shrink Ring ring scores.');
@@ -3803,6 +3807,29 @@ function startPrecision(room: Room, court: Court, match: Match) {
     ricochetRound: room.selectedGameId === 'ricochet' ? 0 : undefined,
   };
   broadcastRoom(room);
+
+  // Lights Out gives exactly 3 seconds to react after the lights go out on
+  // every start. This overall watchdog also covers a browser/tab that becomes
+  // suspended and stops running its local timers entirely.
+  if (room.selectedGameId === 'lights-out') {
+    const expectedMatchId = match.id;
+    setTimeout(() => {
+      const live = findLiveMatch(room, expectedMatchId);
+      const state = live?.match.precision;
+      if (!live || !state || state.phase !== 'playing' || state.gameId !== 'lights-out') return;
+      for (const playerId of live.match.playerIds) {
+        if (state.results[playerId]) continue;
+        try {
+          submitPrecisionResult(room, live.court, live.match, playerId, {
+            score: 3000,
+            secondary: 3000,
+            display: '3.000 s median · server timeout',
+            rounds: [3000, 3000, 3000, 3000, 3000],
+          });
+        } catch { /* match may have resolved while the watchdog was running */ }
+      }
+    }, 50000);
+  }
 
   // Time Stop must never be able to hold a court indefinitely. The client
   // auto-times each target at 20 seconds; this server watchdog is a second
@@ -4454,6 +4481,100 @@ function integrateLateJoiners(room: Room) {
   }
 }
 
+// A class round should not begin again court-by-court. Doing that can strand
+// humans on different courts when one match finishes much earlier than another
+// (especially with an odd player count and a parity bot). Wait until every live
+// match in the current round has resolved, then rebuild the whole ladder from
+// all connected eligible humans in one pass.
+function rebuildNextRoundIfReady(room: Room) {
+  if (room.phase === 'lobby' || room.courts.some((court) => court.activeMatch)) return false;
+
+  const desired = new Map<string, { court: number; order: number }>();
+  let order = 0;
+  for (const court of room.courts) {
+    for (const playerId of court.waiting) {
+      const player = room.players.get(playerId);
+      if (!player || player.isBot || !player.connected) continue;
+      if (!desired.has(playerId)) desired.set(playerId, { court: court.index, order: order++ });
+    }
+  }
+
+  // Late/reconnected players enter at the bottom of the ladder at the next
+  // clean round boundary.
+  for (const playerId of room.lateJoinQueue) {
+    const player = room.players.get(playerId);
+    if (!player || player.isBot || !player.connected) continue;
+    if (!desired.has(playerId)) desired.set(playerId, { court: 0, order: order++ });
+  }
+
+  // Safety net: no connected human may disappear from the next round merely
+  // because an earlier routing queue became inconsistent.
+  for (const player of room.players.values()) {
+    if (player.isBot || !player.connected) continue;
+    if (!desired.has(player.id)) desired.set(player.id, { court: 0, order: order++ });
+  }
+
+  const humans = [...room.players.values()]
+    .filter((player) => !player.isBot && player.connected)
+    .sort((a, b) => {
+      const pa = desired.get(a.id) ?? { court: 0, order: 0 };
+      const pb = desired.get(b.id) ?? { court: 0, order: 0 };
+      return pa.court - pb.court || a.points - b.points || pa.order - pb.order || a.name.localeCompare(b.name);
+    });
+
+  // Old parity bots never carry into a new round. Recreate exactly one bot only
+  // when the human total is odd (or when the host is genuinely alone).
+  for (const [id, player] of room.players) {
+    if (player.isBot) room.players.delete(id);
+  }
+
+  // Keep disconnected late joiners queued so they can still re-enter after a
+  // reconnect. Connected late joiners are being integrated now.
+  room.lateJoinQueue = room.lateJoinQueue.filter((id) => {
+    const player = room.players.get(id);
+    return Boolean(player && !player.isBot && !player.connected);
+  });
+
+  const nextCourts: Court[] = [];
+  const allHumans = [...humans];
+  let courtIndex = 0;
+
+  if (humans.length === 1) {
+    const bot = createPracticeBot();
+    room.players.set(bot.id, bot);
+    nextCourts.push({ index: 0, activeMatch: makeMatch(0, humans[0].id, bot.id, 'ready'), waiting: [] });
+  } else if (humans.length > 1) {
+    if (humans.length % 2 === 1) {
+      const lowestHuman = humans.shift()!;
+      const bot = createPracticeBot();
+      room.players.set(bot.id, bot);
+      nextCourts.push({ index: courtIndex, activeMatch: makeMatch(courtIndex, lowestHuman.id, bot.id, 'ready'), waiting: [] });
+      courtIndex += 1;
+    }
+    for (let i = 0; i < humans.length; i += 2) {
+      nextCourts.push({
+        index: courtIndex,
+        activeMatch: makeMatch(courtIndex, humans[i].id, humans[i + 1].id, 'ready'),
+        waiting: [],
+      });
+      courtIndex += 1;
+    }
+  }
+
+  room.courts = nextCourts;
+  room.hostParticipating = allHumans.some((player) => player.id === room.hostId);
+  room.hostExitAfterMatch = false;
+  if (room.currentChampionId && !allHumans.some((player) => player.id === room.currentChampionId)) room.currentChampionId = undefined;
+
+  if (room.phase === 'playing') {
+    for (const court of room.courts) {
+      if (court.activeMatch?.status === 'ready') scheduleMatchStart(room, court, court.activeMatch);
+    }
+  }
+  broadcastRoom(room);
+  return true;
+}
+
 function rebalanceHostAfterRemoval(room: Room) {
   if (room.phase === 'lobby') return;
   const host = room.players.get(room.hostId);
@@ -4508,8 +4629,7 @@ function kickPlayerFromRoom(room: Room, targetId: string) {
   room.players.delete(target.id);
   socketsByPlayer.delete(target.id);
   rebalanceHostAfterRemoval(room);
-  tryStartWaitingMatches(room);
-  integrateLateJoiners(room);
+  rebuildNextRoundIfReady(room);
 }
 
 function resolveMatch(room: Room, matchId: string, winnerId: string) {
@@ -4527,58 +4647,33 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
   if (winner) winner.points += 1;
   if (court.index === lastCourt && winner && !winner.isBot) room.currentChampionId = winnerId;
 
-  const botId = match.playerIds.find((id) => room.players.get(id)?.isBot);
-  const humanId = botId ? match.playerIds.find((id) => id !== botId) : undefined;
-  if (botId) {
-    const latePlayerId = court.index === 0 ? takeNextConnectedLateJoiner(room) : undefined;
-    if (latePlayerId && humanId) {
-      court.activeMatch = undefined;
-      court.waiting = court.waiting.filter((id) => id !== botId && id !== humanId);
-      // The arrival makes this bot unnecessary. Replace it with the late human
-      // at the clean match boundary, including the solo Host-vs-Bot case. This
-      // turns Host + 1 student into Host vs Student instead of Student vs Bot.
-      room.players.delete(botId);
-      room.hostParticipating = humanId === room.hostId ? true : room.hostParticipating;
-      room.hostExitAfterMatch = false;
-      const nextMatch = makeMatch(court.index, humanId, latePlayerId, 'ready');
-      court.activeMatch = nextMatch;
-      scheduleMatchStart(room, court, nextMatch);
-      broadcastRoom(room);
-      return;
-    }
-  }
-
   const winnerDestination = Math.min(lastCourt, court.index + 1);
   const loserDestination = Math.max(0, court.index - 1);
   court.activeMatch = undefined;
 
-  const routePlayer = (playerId: string, destination: number) => {
+  const routeHuman = (playerId: string, destination: number) => {
     const player = room.players.get(playerId);
-    if (!player) return;
+    if (!player || player.isBot) return;
     if (playerId === room.hostId && room.hostExitAfterMatch) {
       room.hostParticipating = false;
       room.hostExitAfterMatch = false;
       return;
     }
-    // Parity bots never climb the ladder. Keep them on the lowest court so a
-    // future late student always enters at the bottom as requested.
-    const target = player.isBot ? 0 : destination;
-    if (room.courts[target] && !room.courts[target].waiting.includes(playerId)) room.courts[target].waiting.push(playerId);
+    if (room.courts[destination] && !room.courts[destination].waiting.includes(playerId)) {
+      room.courts[destination].waiting.push(playerId);
+    }
   };
 
-  routePlayer(winnerId, winnerDestination);
-  routePlayer(loserId, loserDestination);
+  // Parity bots are round fillers, not ladder competitors. Route only humans;
+  // the next synchronized round will recreate one bot iff the human total is odd.
+  routeHuman(winnerId, winnerDestination);
+  routeHuman(loserId, loserDestination);
 
-  // If solo practice ended because real students arrived and there is no host
-  // left for the bot to face, remove the now-orphaned bot cleanly.
-  if (botId && humanId === room.hostId && !room.hostParticipating) {
-    for (const c of room.courts) c.waiting = c.waiting.filter((id) => id !== botId);
-    room.players.delete(botId);
-  }
-
-  tryStartWaitingMatches(room);
-  integrateLateJoiners(room);
-  broadcastRoom(room);
+  // Do not immediately start the first court that happens to collect two names.
+  // That old behaviour caused the 3-player failure where one player fought the
+  // bot while the host and another human were stranded in separate waiting
+  // queues. The next round begins only when every current match is finished.
+  if (!rebuildNextRoundIfReady(room)) broadcastRoom(room);
 }
 
 function resetToLobby(room: Room) {
