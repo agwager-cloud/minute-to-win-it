@@ -4173,15 +4173,28 @@ function startPrecision(room: Room, court: Court, match: Match) {
       } else if (room.selectedGameId === 'stack') {
         const rounds: number[] = [];
         let alive = true;
+        let remainingValue = 100;
         for (let i = 0; i < 8; i++) {
           if (!alive) { rounds.push(0); continue; }
           const miss = Math.random() < (0.01 + i * 0.007);
           if (miss) { rounds.push(0); alive = false; continue; }
-          const floor = Math.max(64, 82 - i * 2);
-          rounds.push(Math.round(floor + Math.random() * (101 - floor)));
+          // Stack scores the absolute fraction of the ORIGINAL block that is still
+          // alive. A perfect later placement preserves the current value rather
+          // than magically returning to 100 points.
+          const retentionFloor = Math.max(76, 91 - i * 1.5);
+          const retentionPct = Math.min(100, retentionFloor + Math.random() * (101 - retentionFloor));
+          remainingValue = Math.max(1, Math.round(remainingValue * retentionPct / 100));
+          rounds.push(remainingValue);
         }
         const score = rounds.reduce((total, value) => total + value, 0);
-        const secondary = Math.round(rounds.reduce((total, value) => total + (100 - value), 0) * 12.5);
+        let previousValue = 100;
+        const relativeLoss = rounds.reduce((total, value) => {
+          if (value <= 0) { previousValue = 0; return total + 100; }
+          const loss = previousValue > 0 ? Math.max(0, 100 - (value / previousValue) * 100) : 100;
+          previousValue = value;
+          return total + loss;
+        }, 0);
+        const secondary = Math.round(relativeLoss * 12.5);
         const placed = rounds.filter((value) => value > 0).length;
         submitPrecisionResult(room, live.court, live.match, botId, {
           score,
@@ -4320,8 +4333,21 @@ function startPrecision(room: Room, court: Court, match: Match) {
 function scheduleMatchStart(room: Room, court: Court, match: Match) {
   match.status = 'countdown';
   match.startsAt = Date.now() + 3000;
+  // A participant's own match always takes priority over live spectating. Clear
+  // any old watcher subscription now so the host cannot keep receiving another
+  // player's stream while their own countdown is beginning.
+  for (const playerId of match.playerIds) {
+    const player = room.players.get(playerId);
+    if (player?.isBot) continue;
+    const playerSocket = socketsByPlayer.get(playerId);
+    if (playerSocket) clearSpectatorSubscription(playerSocket);
+  }
   broadcastRoom(room);
   setTimeout(() => {
+    // Returning to the lobby replaces the court list. Old countdown timers must
+    // never be allowed to resurrect a detached match and flip the room back to
+    // `playing`, which previously produced an empty matchup screen.
+    if (room.phase === 'lobby' || !room.courts.includes(court)) return;
     const current = court.activeMatch;
     if (!current || current.id !== match.id || current.status !== 'countdown') return;
     current.status = 'playing';
@@ -4693,6 +4719,13 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
 
 function resetToLobby(room: Room) {
   room.phase = 'lobby';
+  // Invalidate the old Court objects before dropping the array. scheduleMatchStart
+  // owns 3-second timers that capture those objects; clearing them guarantees a
+  // late timer cannot restart a match after the teacher has returned to lobby.
+  for (const court of room.courts) {
+    court.activeMatch = undefined;
+    court.waiting = [];
+  }
   room.courts = [];
   room.hostParticipating = false;
   room.hostExitAfterMatch = false;
@@ -4910,8 +4943,7 @@ wss.on('connection', (ws) => {
         const { room, ctx } = result;
         const live = findLiveMatch(room, String(msg.matchId));
         if (!live || !ctx.playerId) throw new Error('That court is no longer live.');
-        const viewer = room.players.get(ctx.playerId);
-        if (!viewer?.isHost && playerActiveMatch(room, ctx.playerId)) throw new Error('Finish your own match before spectating another court.');
+        if (playerActiveMatch(room, ctx.playerId)) throw new Error('Your own match is active. Finish your match before spectating another court.');
         const humanPovs = live.match.playerIds.filter((id) => !room.players.get(id)?.isBot);
         const requested = String(msg.povPlayerId || '');
         const povPlayerId = humanPovs.includes(requested) ? requested : humanPovs[0];
