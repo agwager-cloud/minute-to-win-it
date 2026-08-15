@@ -77,7 +77,7 @@ type Session={roomCode:string;playerId:string;resumeToken:string;isHost:boolean}
 
 class MinuteApp{
   room?:RoomState; session?:Session; status:'connecting'|'online'|'offline'='connecting'; statusDetail=''; message=''; spectatingMatchId?:string; spectatingPlayerId?:string;
-  private presenceRepairAt=0; private serverClockOffset=0; private managePlayersOpen=false; private hostMatchupsMode=false;
+  private presenceRepairAt=0; private emptyCourtsRepairAt=0; private serverClockOffset=0; private managePlayersOpen=false; private hostMatchupsMode=false; private spectatorRetryTimer?:number;
   private spectatorFrames=new Map<string,SpectatorFrame>(); private streamRequestedMatches=new Set<string>();
   controller?:PrecisionController;
   net:NetworkClient;
@@ -109,9 +109,11 @@ class MinuteApp{
   serverNow(){return Date.now()+this.serverClockOffset}
   isSpectatorStreamRequested(matchId:string){return this.streamRequestedMatches.has(matchId)}
   private onSpectatorStreamRequest(matchId:string,active:boolean){if(!matchId)return;if(active)this.streamRequestedMatches.add(matchId);else this.streamRequestedMatches.delete(matchId);if(this.controller?.matchId===matchId)this.controller.setSpectatorStreaming(active)}
-  private onSpectatorFrame(frame:SpectatorFrame){if(!frame?.matchId||!frame.playerId)return;this.spectatorFrames.set(this.frameKey(frame.matchId,frame.playerId),frame);if(frame.matchId===this.spectatingMatchId&&frame.playerId===this.spectatingPlayerId)this.applySpectatorFrame(frame)}
-  private beginSpectating(matchId:string,povPlayerId?:string){const match=this.findMatch(matchId);if(!match)return;const candidates=match.playerIds.filter(id=>!this.player(id)?.isBot);const pov=(povPlayerId&&candidates.includes(povPlayerId)?povPlayerId:candidates.find(id=>!match.precision?.results[id]))||candidates[0];if(!pov)return;this.spectatingMatchId=matchId;this.spectatingPlayerId=pov;this.hostMatchupsMode=false;this.net.send({type:'spectate-match',matchId,povPlayerId:pov});this.render()}
-  private stopSpectating(){if(this.spectatingMatchId)this.net.send({type:'stop-spectating'});this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;}
+  private onSpectatorFrame(frame:SpectatorFrame){if(!frame?.matchId||!frame.playerId)return;this.spectatorFrames.set(this.frameKey(frame.matchId,frame.playerId),frame);if(frame.matchId===this.spectatingMatchId&&frame.playerId===this.spectatingPlayerId){this.clearSpectatorRetry();this.applySpectatorFrame(frame)}}
+  private clearSpectatorRetry(){if(this.spectatorRetryTimer)clearInterval(this.spectatorRetryTimer);this.spectatorRetryTimer=undefined;}
+  private ensureSpectatorRetry(matchId:string,povPlayerId:string){this.clearSpectatorRetry();this.spectatorRetryTimer=window.setInterval(()=>{if(this.spectatingMatchId!==matchId||this.spectatingPlayerId!==povPlayerId||this.spectatorFrames.has(this.frameKey(matchId,povPlayerId))){this.clearSpectatorRetry();return;}const own=this.activeMatchFor(this.session?.playerId);if(own){this.clearSpectatorRetry();this.stopSpectating();this.render();return;}this.net.send({type:'spectate-match',matchId,povPlayerId});const root=document.querySelector<HTMLElement>('#spectator-live-root');const progress=this.findMatch(matchId)?.precision?.progress[povPlayerId];const label=progress?.label?esc(progress.label):'LIVE GAME IN PROGRESS';if(root&&root.querySelector('.spectator-feed-loading'))root.innerHTML=`<div class="spectator-feed-loading"><div class="spinner"></div><strong>RECONNECTING LIVE PLAYER VIEW…</strong><small>${label} · Retrying the spectator stream automatically. Your own match will always take priority.</small></div>`;},1800);}
+  private beginSpectating(matchId:string,povPlayerId?:string){const own=this.activeMatchFor(this.session?.playerId);if(own){this.hostMatchupsMode=false;this.stopSpectating();this.toast('Your match is ready — returning you to your own court.','ok');this.render();return;}const match=this.findMatch(matchId);if(!match)return;const candidates=match.playerIds.filter(id=>!this.player(id)?.isBot);const pov=(povPlayerId&&candidates.includes(povPlayerId)?povPlayerId:candidates.find(id=>!match.precision?.results[id]))||candidates[0];if(!pov)return;this.spectatingMatchId=matchId;this.spectatingPlayerId=pov;this.hostMatchupsMode=false;this.net.send({type:'spectate-match',matchId,povPlayerId:pov});this.render()}
+  private stopSpectating(){this.clearSpectatorRetry();if(this.spectatingMatchId)this.net.send({type:'stop-spectating'});this.spectatingMatchId=undefined;this.spectatingPlayerId=undefined;}
   private switchSpectatorPov(playerId:string){if(!this.spectatingMatchId||playerId===this.spectatingPlayerId)return;this.spectatingPlayerId=playerId;this.net.send({type:'spectate-match',matchId:this.spectatingMatchId,povPlayerId:playerId});this.render()}
   private applySpectatorFrame(frame:SpectatorFrame){const root=document.querySelector<HTMLElement>('#spectator-live-root');if(!root||frame.matchId!==this.spectatingMatchId||frame.playerId!==this.spectatingPlayerId)return;root.replaceChildren(safeSpectatorFragment(frame.html));root.querySelectorAll<HTMLButtonElement>('button').forEach(b=>{b.disabled=true;b.tabIndex=-1});root.querySelectorAll<HTMLInputElement>('input').forEach(i=>{i.disabled=true;i.tabIndex=-1});for(const c of frame.canvases||[]){const canvas=root.querySelectorAll<HTMLCanvasElement>('canvas')[c.index];if(!canvas||!/^data:image\/(png|webp);base64,/i.test(c.dataUrl))continue;canvas.width=Math.max(1,c.width);canvas.height=Math.max(1,c.height);const ctx=canvas.getContext('2d'),img=new Image();img.onload=()=>{if(!ctx)return;ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(img,0,0,canvas.width,canvas.height)};img.src=c.dataUrl;}}
   onRoomState(r:RoomState){
@@ -122,6 +124,13 @@ class MinuteApp{
     // room snapshot says *this* player is offline, force a clean resume. This
     // prevents an older replaced socket from leaving an iPad/phone greyed out.
     const me=r.players.find(p=>p.id===this.session?.playerId);
+    // Defensive recovery: a non-lobby room with zero courts is never a valid
+    // playable state. Older countdown callbacks could very rarely recreate that
+    // state after RETURN TO LOBBY. The server now prevents it, and the host client
+    // also self-heals any stale snapshot that might survive an update/reconnect.
+    if(me?.isHost&&r.phase!=='lobby'&&r.courts.length===0&&this.net.isOnline()&&Date.now()-this.emptyCourtsRepairAt>2500){
+      this.emptyCourtsRepairAt=Date.now();this.net.send({type:'return-lobby'});return;
+    }
     if(me&&!me.connected&&this.net.isOnline()&&Date.now()-this.presenceRepairAt>4000){
       this.presenceRepairAt=Date.now();
       this.net.repairRoomSession();
@@ -140,13 +149,16 @@ class MinuteApp{
     // Prepared courts stay on the matchup screen until the host explicitly begins.
     if(this.room.phase==='matchups'){this.renderMatchups();return;}
     const mine=this.activeMatchFor(this.session.playerId);
-    // A waiting/late student who gets paired must leave spectator mode
-    // immediately and enter their own countdown/game automatically.
-    if(mine&&!this.me?.isHost){if(this.spectatingMatchId)this.stopSpectating();this.renderGame(mine,false);return;}
+    // A player's own live court always wins over spectator mode. This now applies
+    // to the host as well: previously the teacher could start spectating another
+    // court, get paired into their own match, and remain stranded on the live-view
+    // screen while their own attempt timed out. The host may still deliberately
+    // open MATCHUPS from their game via hostMatchupsMode, but watching another
+    // court can never steal priority from an active personal match.
+    if(mine&&!this.hostMatchupsMode){if(this.spectatingMatchId)this.stopSpectating();this.renderGame(mine,false);return;}
     const watched=this.findMatch(this.spectatingMatchId);
     if(watched){this.renderGame(watched,true);return;}
     if(this.me?.isHost&&this.hostMatchupsMode){this.renderMatchups();return;}
-    if(mine){this.renderGame(mine,false);return;}
     this.renderMatchups();
   }
   shell(inner:string,klass=''){
@@ -204,7 +216,7 @@ class MinuteApp{
       if(pov)this.net.send({type:'spectate-match',matchId:match.id,povPlayerId:pov});
       const povButtons=humans.length>1?`<div class="pov-switch">${humans.map(id=>`<button class="pov-btn ${id===pov?'active':''}" data-pov="${id}">👁 ${esc(this.player(id)?.name||'Player')}</button>`).join('')}</div>`:`<div class="pov-switch"><span>👁 Watching ${esc(this.player(pov)?.name||'Player')}</span></div>`;
       appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">👁 LIVE SPECTATOR · COURT ${match.courtIndex+1}</span><h2>${game.symbol} ${esc(game.title)}</h2></div>${povButtons}<div class="game-nav"><button id="back-matchups" class="secondary small">← MATCHUPS</button></div></div><div id="precision-stage" class="precision-stage spectator-stage"><div id="spectator-live-root" class="spectator-live-root"><div class="spectator-feed-loading"><div class="spinner"></div><strong>CONNECTING TO LIVE PLAYER VIEW…</strong><small>Timers, positions and scores are streamed from the actual game.</small></div></div></div></section>`,'game-screen');
-      this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});document.querySelectorAll<HTMLElement>('[data-pov]').forEach(el=>el.addEventListener('click',()=>this.switchSpectatorPov(String(el.dataset.pov||''))));const cached=pov?this.spectatorFrames.get(this.frameKey(match.id,pov)):undefined;if(cached)this.applySpectatorFrame(cached);return;
+      this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.stopSpectating();this.hostMatchupsMode=Boolean(this.me?.isHost);this.renderMatchups()});document.querySelectorAll<HTMLElement>('[data-pov]').forEach(el=>el.addEventListener('click',()=>this.switchSpectatorPov(String(el.dataset.pov||''))));const cached=pov?this.spectatorFrames.get(this.frameKey(match.id,pov)):undefined;if(cached)this.applySpectatorFrame(cached);else if(pov)this.ensureSpectatorRetry(match.id,pov);return;
     }
     appEl.innerHTML=this.shell(`<section class="game-shell"><div class="game-header"><div><span class="eyebrow">${champ?'👑 CHAMPIONSHIP MATCH':`COURT ${match.courtIndex+1}`}</span><h2>${game.symbol} ${esc(game.title)}</h2></div><div class="head-versus"><strong>${esc(a?.name)}</strong><span>VS</span><strong>${esc(b?.name)}</strong></div><div class="game-nav">${hostCanNavigate?'<button id="back-matchups" class="secondary small">← MATCHUPS</button>':''}</div></div><div id="precision-stage" class="precision-stage"></div></section>`,'game-screen');
     this.bindCommon();document.querySelector('#back-matchups')?.addEventListener('click',()=>{this.hostMatchupsMode=true;this.renderMatchups()});const myId=this.session!.playerId;const isParticipant=match.playerIds.includes(myId);if(isParticipant&&!precision.results[myId]){this.controller=new PrecisionController(this,match,precision,game);this.controller.start();}else this.renderPrecisionWatcher(match,precision,game,false);
@@ -257,7 +269,7 @@ class PrecisionController{
     if(this.game.id==='lights-out')void this.runLightsOut();else if(this.game.id==='time-stop')void this.runTimeStop();else if(this.game.id==='shrink-ring')void this.runShrinkRing();else if(this.game.id==='parry')void this.runParry();else if(this.game.id==='blind-beat')void this.runBlindBeat();else if(this.game.id==='overpour')void this.runOverpour();else if(this.game.id==='charge-shot')void this.runChargeShot();else if(this.game.id==='stack')void this.runStack();else if(this.game.id==='trace')void this.runTrace();else if(this.game.id==='ricochet')void this.runRicochet();else if(this.game.id==='knife-wheel')void this.runKnifeWheel();else if(this.game.id==='conveyor-chef')void this.runConveyorChef();else if(this.game.id==='pole-balance')void this.runPoleBalance();else if(this.game.id==='fuse')void this.runFuse();
   }
   destroy(){this.destroyed=true;this.running=false;this.unbindSpacebar();this.timers.forEach(clearTimeout);if(this.raf)cancelAnimationFrame(this.raf);if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;}
-  setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),120);}
+  setSpectatorStreaming(active:boolean){if(!active){if(this.spectatorTimer)clearInterval(this.spectatorTimer);this.spectatorTimer=undefined;return;}if(this.spectatorTimer||this.destroyed)return;this.publishSpectatorFrame();this.spectatorTimer=window.setInterval(()=>this.publishSpectatorFrame(),220);}
   private publishSpectatorFrame(){
     if(this.destroyed||!this.running)return;const stage=this.stage();if(!stage||!stage.isConnected)return;
     const canvases=[...stage.querySelectorAll<HTMLCanvasElement>('canvas')].slice(0,3).map((canvas,index)=>{
@@ -267,9 +279,9 @@ class PrecisionController{
         // per second. That could flood the same WebSocket used by gameplay and
         // heartbeat traffic. Downscale only the transport copy; spectators still
         // see the exact live player rendering, just compressed for delivery.
-        const maxW=960,maxH=540,scale=Math.min(1,maxW/Math.max(1,width),maxH/Math.max(1,height));
-        if(scale<.999){const copy=document.createElement('canvas');copy.width=Math.max(1,Math.round(width*scale));copy.height=Math.max(1,Math.round(height*scale));copy.getContext('2d')?.drawImage(canvas,0,0,copy.width,copy.height);width=copy.width;height=copy.height;dataUrl=copy.toDataURL('image/webp',.52);if(!dataUrl.startsWith('data:image/webp'))dataUrl=copy.toDataURL('image/png');}
-        else{dataUrl=canvas.toDataURL('image/webp',.52);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png');}
+        const maxW=720,maxH=405,scale=Math.min(1,maxW/Math.max(1,width),maxH/Math.max(1,height));
+        if(scale<.999){const copy=document.createElement('canvas');copy.width=Math.max(1,Math.round(width*scale));copy.height=Math.max(1,Math.round(height*scale));copy.getContext('2d')?.drawImage(canvas,0,0,copy.width,copy.height);width=copy.width;height=copy.height;dataUrl=copy.toDataURL('image/webp',.42);if(!dataUrl.startsWith('data:image/webp'))dataUrl=copy.toDataURL('image/png');}
+        else{dataUrl=canvas.toDataURL('image/webp',.42);if(!dataUrl.startsWith('data:image/webp'))dataUrl=canvas.toDataURL('image/png');}
       }catch{}
       return{index,width,height,dataUrl};
     }).filter(c=>c.dataUrl);
@@ -622,7 +634,7 @@ class PrecisionController{
         <div class="charge-landing-marker" id="charge-landing-marker"></div>
       </div>
       <div class="charge-controls">
-        <div class="charge-target-card"><small>TARGET RANGE</small><strong id="charge-target-card">70</strong><em id="charge-strength-label">STANDARD LAUNCHER</em></div>
+        <div class="charge-target-card"><small>TARGET POWER</small><strong id="charge-target-card">70%</strong><em id="charge-strength-label">MATCH THIS % ON THE METER</em></div>
         <div id="charge-message" class="charge-message">GET READY</div>
         <div class="charge-meter"><div id="charge-meter-fill"></div><span id="charge-power">0%</span></div>
         <button id="charge-pad" class="charge-pad">HOLD TO CHARGE<small>Release to launch toward the target</small></button>
@@ -640,8 +652,11 @@ class PrecisionController{
     await sleep(650);
     for(let round=0;round<rounds&&!this.destroyed;round++){
       roundEl.textContent=String(round+1);currentPower=0;meterFill.style.width='0%';powerEl.textContent='0%';waitFill.style.width='100%';arena.className='charge-arena';pad.className='charge-pad';rocket.style.left='7%';rocket.style.bottom='45px';rocket.style.transform='translate(-50%,0) rotate(-18deg)';marker.className='charge-landing-marker';
-      const target=48+seededUnit(this.state.seed,900+round)*36;const strength=.90+seededUnit(this.state.seed,940+round)*.25;chargeRate=31+seededUnit(this.state.seed,980+round)*20;
-      const targetX=7+target*.86;targetZone.style.left=`${targetX}%`;targetCard.textContent=String(Math.round(target));strengthLabel.textContent=strength<.98?'GENTLE LAUNCHER':strength<1.08?'STANDARD LAUNCHER':'BOOSTED LAUNCHER';
+      const target=48+seededUnit(this.state.seed,900+round)*36;chargeRate=31+seededUnit(this.state.seed,980+round)*20;
+      // Target power is now a true 1:1 mapping: a 60% target lands at 60% when
+      // the player releases at 60%. The old hidden launcher-strength multiplier
+      // made the displayed target disagree with the charge meter.
+      const targetX=7+target*.86;targetZone.style.left=`${targetX}%`;targetCard.textContent=`${Math.round(target)}%`;strengthLabel.textContent='MATCH THIS % ON THE METER';
       msg.textContent='HOLD WHEN READY';pad.innerHTML='HOLD TO CHARGE<small>Release to launch · full charge fires automatically</small>';phase='waiting';activePointer=-1;
       const waitingStarted=performance.now();let noStartTimer=0;
       const roundPromise=new Promise<ShotResult>(resolve=>{resolveRound=resolve;noStartTimer=window.setTimeout(()=>{if(this.destroyed||phase!=='waiting')return;phase='locked';resolve({power:0,kind:'no-start'});},4500);this.timers.push(noStartTimer)});
@@ -651,7 +666,7 @@ class PrecisionController{
         this.raf=requestAnimationFrame(animateCharge);
       };this.raf=requestAnimationFrame(animateCharge);
       const result=await roundPromise;clearTimeout(noStartTimer);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;
-      const landing=result.kind==='no-start'?0:Math.min(100,result.power*strength);const landingX=7+landing*.86;const error=result.kind==='no-start'?100:Math.abs(landing-target);const earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-error*4)));
+      const landing=result.kind==='no-start'?0:Math.min(100,result.power);const landingX=7+landing*.86;const error=result.kind==='no-start'?100:Math.abs(landing-target);const earned=result.kind==='no-start'?0:Math.max(0,Math.min(100,Math.round(100-error*4)));
       if(result.kind!=='no-start'){
         const start=performance.now(),duration=720,startX=7,endX=landingX;
         await new Promise<void>(resolve=>{const fly=(now:number)=>{if(this.destroyed){resolve();return;}const t=Math.min(1,(now-start)/duration),ease=1-Math.pow(1-t,2),x=startX+(endX-startX)*ease,y=45+Math.sin(Math.PI*t)*Math.min(150,arena.clientHeight*.48);rocket.style.left=`${x}%`;rocket.style.bottom=`${y}px`;rocket.style.transform=`translate(-50%,0) rotate(${(-18+65*t)}deg)`;if(t<1)this.raf=requestAnimationFrame(fly);else resolve();};this.raf=requestAnimationFrame(fly);});
@@ -660,14 +675,14 @@ class PrecisionController{
       points.push(earned);errors.push(error);const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);
       const signed=landing-target,abs=Math.abs(signed);let feedback='',detail='';
       if(result.kind==='no-start'){feedback='NO SHOT';detail='0 points · shot advanced automatically';arena.classList.add('failed');pad.classList.add('miss');pad.innerHTML='0 POINTS<small>You did not start charging</small>';sound.beep(190,.09);}
-      else {feedback=earned>=96?'BULLSEYE!':earned>=84?'GREAT SHOT!':earned>=68?'GOOD SHOT!':earned>=45?'CLOSE!':signed>0?'OVERSHOT':'FELL SHORT';detail=`Landed ${abs.toFixed(1)} range units ${signed>=0?'past':'short of'} target`;arena.classList.add(earned>=84?'success':earned>=45?'close':'failed');pad.classList.add(earned>=84?'success':earned>=45?'close':'miss');pad.innerHTML=`${earned} POINTS<small>${abs.toFixed(1)} from target${result.kind==='full'?' · auto-fired at full charge':''}</small>`;sound.beep(earned>=90?920:earned>=60?650:330,.07);}
+      else {feedback=earned>=96?'BULLSEYE!':earned>=84?'GREAT SHOT!':earned>=68?'GOOD SHOT!':earned>=45?'CLOSE!':signed>0?'OVERSHOT':'FELL SHORT';detail=`Released at ${landing.toFixed(1)}% · ${abs.toFixed(1)}% ${signed>=0?'over':'under'} target`;arena.classList.add(earned>=84?'success':earned>=45?'close':'failed');pad.classList.add(earned>=84?'success':earned>=45?'close':'miss');pad.innerHTML=`${earned} POINTS<small>${abs.toFixed(1)} from target${result.kind==='full'?' · auto-fired at full charge':''}</small>`;sound.beep(earned>=90?920:earned>=60?650:330,.07);}
       msg.innerHTML=`${feedback}<small>${detail}</small>`;history.innerHTML=points.map((value,i)=>`<span class="${value>=84?'great':value>=45?'okay':'miss'}"><b>${i+1}</b>${value}</span>`).join('');this.sendProgress(round+1,feedback,total);await sleep(1050);phase='idle';
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgError=errors.reduce((a,b)=>a+b,0)/errors.length,totalError=Math.round(errors.reduce((a,b)=>a+b,0)*100);this.sendResult(total,totalError,`${total} / 500 pts · ${avgError.toFixed(1)} avg miss`,points);
   }
   async runStack(){
     const stage=this.stage();if(!stage)return;
-    const drops=8,maxScore=800,points:number[]=[],overhangs:number[]=[];
+    const drops=8,maxScore=800,points:number[]=[],overhangs:number[]=[],qualities:number[]=[];
     stage.innerHTML=`<div class="stack-game">
       <div class="stack-topline"><div class="trial-label">DROP <span id="stack-round">1</span> / ${drops}</div><div class="stack-score">SCORE <strong id="stack-score">0</strong><small>/ ${maxScore}</small></div></div>
       <div class="stack-arena" id="stack-arena">
@@ -686,7 +701,7 @@ class PrecisionController{
     </div>`;
     const roundEl=document.querySelector<HTMLElement>('#stack-round')!,scoreEl=document.querySelector<HTMLElement>('#stack-score')!,arena=document.querySelector<HTMLElement>('#stack-arena')!,tower=document.querySelector<HTMLElement>('#stack-tower')!,moving=document.querySelector<HTMLElement>('#stack-moving')!,slice=document.querySelector<HTMLElement>('#stack-slice')!,status=document.querySelector<HTMLElement>('#stack-status')!,detail=document.querySelector<HTMLElement>('#stack-detail')!,pad=document.querySelector<HTMLButtonElement>('#stack-pad')!,timeFill=document.querySelector<HTMLElement>('#stack-time-fill')!,timeLabel=document.querySelector<HTMLElement>('#stack-time-label')!,history=document.querySelector<HTMLElement>('#stack-history')!;
     type DropResult={left:number;timedOut:boolean};
-    let phase:'idle'|'running'|'locked'='idle',currentWidth=49.6,topLeft=25.2,resolveDrop:(r:DropResult)=>void=()=>{},movingLeft=25.2;
+    const initialWidth=49.6;let phase:'idle'|'running'|'locked'='idle',currentWidth=initialWidth,topLeft=25.2,resolveDrop:(r:DropResult)=>void=()=>{},movingLeft=25.2;
     pad.addEventListener('pointerdown',e=>{e.preventDefault();if(phase!=='running')return;phase='locked';resolveDrop({left:movingLeft,timedOut:false});sound.beep(780,.05)});
     await sleep(650);
     // Base width/position are percentages of the arena. Vertical spacing is
@@ -701,20 +716,20 @@ class PrecisionController{
       let timeoutId=0;const resultPromise=new Promise<DropResult>(resolve=>{resolveDrop=resolve;timeoutId=window.setTimeout(()=>{if(this.destroyed||phase!=='running')return;phase='locked';resolve({left:movingLeft,timedOut:true});},6000);this.timers.push(timeoutId)});
       const animate=(now:number)=>{if(this.destroyed||phase!=='running')return;const elapsed=(now-started)/1000;const span=Math.max(.1,travelMax-travelMin);const distance=(speed*elapsed)% (span*2);const offset=distance<=span?distance:(span*2-distance);movingLeft=startFromLeft?travelMin+offset:travelMax-offset;moving.style.left=`${movingLeft}%`;timeFill.style.width=`${Math.max(0,100-(now-started)/60)}%`;timeLabel.textContent=`${Math.max(0,6-(now-started)/1000).toFixed(1)} s`;this.raf=requestAnimationFrame(animate)};this.raf=requestAnimationFrame(animate);
       const dropped=await resultPromise;clearTimeout(timeoutId);if(this.raf)cancelAnimationFrame(this.raf);if(this.destroyed)return;movingLeft=dropped.left;
-      const left=Math.max(movingLeft,topLeft),right=Math.min(movingLeft+blockWidth,topLeft+currentWidth),overlap=Math.max(0,right-left),offset=Math.abs(movingLeft-topLeft);let earned=0,perfect=false;
-      if(!dropped.timedOut&&overlap>0){const snapTolerance=Math.max(.65,Math.min(1.8,currentWidth*.035));perfect=offset<=snapTolerance;earned=perfect?100:Math.max(8,Math.min(99,Math.round(100*(overlap/blockWidth))));}
-      if(dropped.timedOut||overlap<=0){earned=0;collapsed=true;}
-      points.push(earned);const overhangPct=dropped.timedOut?100:Math.max(0,100-overlap/blockWidth*100);overhangs.push(overhangPct);
+      const left=Math.max(movingLeft,topLeft),right=Math.min(movingLeft+blockWidth,topLeft+currentWidth),overlap=Math.max(0,right-left),offset=Math.abs(movingLeft-topLeft);let earned=0,perfect=false,retentionPct=0;
+      if(!dropped.timedOut&&overlap>0){const snapTolerance=Math.max(.65,Math.min(1.8,currentWidth*.035));perfect=offset<=snapTolerance;const placedWidth=perfect?currentWidth:overlap;retentionPct=perfect?100:Math.max(0,Math.min(100,100*(overlap/blockWidth)));earned=Math.max(1,Math.min(100,Math.round(100*(placedWidth/initialWidth))));}
+      if(dropped.timedOut||overlap<=0){earned=0;retentionPct=0;collapsed=true;}
+      points.push(earned);qualities.push(retentionPct);const overhangPct=dropped.timedOut?100:Math.max(0,100-overlap/blockWidth*100);overhangs.push(overhangPct);
       if(collapsed){moving.className='stack-moving dropped collapse';arena.classList.add('collapsed');status.className='bad';status.textContent=dropped.timedOut?'TIME OUT — TOWER LOST':'MISSED THE TOWER!';detail.textContent='The remaining drops score 0 automatically';pad.className='stack-pad miss';pad.innerHTML='TOWER COLLAPSED<small>Run ends automatically</small>';sound.beep(170,.12);
       }else{
         const placedLeft=perfect?topLeft:left,placedWidth=perfect?currentWidth:overlap;moving.className=`stack-moving dropped ${perfect?'perfect':''}`;moving.style.left=`${placedLeft}%`;moving.style.width=`${placedWidth}%`;
         if(!perfect&&overlap<blockWidth){const cutLeft=movingLeft<topLeft?movingLeft:left+overlap,cutWidth=blockWidth-overlap;slice.style.left=`${cutLeft}%`;slice.style.width=`${cutWidth}%`;slice.style.bottom=`${firstBottom+round*blockStep}px`;slice.className='stack-slice show';}
         const placed=document.createElement('div');placed.className=`stack-placed ${perfect?'perfect':''}`;placed.style.left=`${placedLeft}%`;placed.style.width=`${placedWidth}%`;placed.style.bottom=`${firstBottom+round*blockStep}px`;placed.innerHTML=`<span>${perfect?'PERFECT':''}</span>`;tower.appendChild(placed);
         topLeft=placedLeft;currentWidth=placedWidth;
-        status.className=earned>=96?'good':earned>=75?'okay':'warn';status.textContent=perfect?'PERFECT STACK!':earned>=85?'GREAT DROP!':earned>=65?'SOLID DROP':'BIG SLICE!';detail.textContent=perfect?'No width lost':`${overhangPct.toFixed(1)}% sliced away · ${currentWidth.toFixed(1)}% tower width remains`;pad.className=`stack-pad ${earned>=85?'success':earned>=60?'close':'miss'}`;pad.innerHTML=`${earned} POINTS<small>${perfect?'Perfect alignment':`${overhangPct.toFixed(1)}% overhang removed`}</small>`;sound.beep(perfect?980:earned>=75?720:430,.075);
+        status.className=retentionPct>=96?'good':retentionPct>=75?'okay':'warn';status.textContent=perfect?'PERFECT STACK!':retentionPct>=85?'GREAT DROP!':retentionPct>=65?'SOLID DROP':'BIG SLICE!';detail.textContent=perfect?`No width lost · ${earned}% of the original block remains`:`${overhangPct.toFixed(1)}% sliced away · ${earned}% of the original block remains`;pad.className=`stack-pad ${retentionPct>=85?'success':retentionPct>=60?'close':'miss'}`;pad.innerHTML=`${earned} POINTS<small>${perfect?'Perfect — keep the full remaining value':`${retentionPct.toFixed(1)}% of this block retained`}</small>`;sound.beep(perfect?980:retentionPct>=75?720:430,.075);
       }
-      const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);history.innerHTML=points.map((v,i)=>`<span class="${v>=90?'great':v>=60?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,collapsed?'TOWER COLLAPSED':status.textContent,total);await sleep(collapsed?1150:850);moving.className='stack-moving';slice.className='stack-slice';phase='idle';
-      if(collapsed){while(points.length<drops){points.push(0);overhangs.push(100)}break;}
+      const total=points.reduce((a,b)=>a+b,0);scoreEl.textContent=String(total);history.innerHTML=points.map((v,i)=>`<span class="${(qualities[i]??0)>=90?'great':(qualities[i]??0)>=60?'okay':'miss'}"><b>${i+1}</b>${v}</span>`).join('');this.sendProgress(round+1,collapsed?'TOWER COLLAPSED':status.textContent,total);await sleep(collapsed?1150:850);moving.className='stack-moving';slice.className='stack-slice';phase='idle';
+      if(collapsed){while(points.length<drops){points.push(0);qualities.push(0);overhangs.push(100)}break;}
     }
     if(this.destroyed)return;const total=points.reduce((a,b)=>a+b,0),avgOverhang=overhangs.reduce((a,b)=>a+b,0)/Math.max(1,overhangs.length),secondary=Math.round(avgOverhang*100);this.sendResult(total,secondary,`${total} / 800 pts · ${avgOverhang.toFixed(1)}% avg overhang`,points);
   }
@@ -1086,14 +1101,14 @@ class PrecisionController{
         [.28,.78,.56,.18,.72,.36,.82,.48],
       ];
       const rushPatterns=[
-        [.74,.20,.80,.24,.68,.16,.76,.28,.82,.34,.62],
-        [.30,.82,.22,.68,.15,.74,.26,.84,.24,.66,.38],
-        [.80,.48,.16,.66,.26,.84,.36,.18,.74,.28,.58],
-        [.24,.72,.42,.84,.20,.64,.18,.78,.34,.70,.26],
+        [.74,.22,.78,.25,.66,.32],
+        [.30,.78,.24,.68,.22,.58],
+        [.78,.42,.20,.72,.32,.62],
+        [.26,.70,.40,.76,.28,.60],
       ];
       const patterns=stageIndex===0?warmPatterns:rushPatterns;
       const pick=Math.floor(fuseUnit(6000+stageIndex)*patterns.length)%patterns.length;
-      const pattern=patterns[pick];const left=stageIndex===0?70:58,right=stageIndex===0?932:944;
+      const pattern=patterns[pick];const left=stageIndex===0?70:58,right=stageIndex===0?932:620;
       return pattern.map((v,i)=>{
         const t=i/(pattern.length-1);const x=left+(right-left)*t+(i===0||i===pattern.length-1?0:(fuseUnit(6020+stageIndex*100+i)-.5)*(stageIndex===0?34:22));
         const yBase=58+v*384;const y=yBase+(fuseUnit(6060+stageIndex*100+i)-.5)*(stageIndex===0?38:28);
@@ -1102,7 +1117,7 @@ class PrecisionController{
     };
     const specs:FuseSpec[]=[
       {name:'FUSE 1',subtitle:'GEM RUN',speed:150,windowMs:175,branchSpeed:520,points:makePath(0),gaps:[1.62,1.50,1.39,1.28],costs:[40,43,46,49,52],branchLens:[80,74,86,78,72]},
-      {name:'FUSE 2',subtitle:'RAPID RUN',speed:188,windowMs:155,branchSpeed:580,points:makePath(1),gaps:[1.05,.93,.83,.74],costs:[47,50,53,56,59],branchLens:[68,64,72,62,68]},
+      {name:'FUSE 2',subtitle:'RAPID RUN',speed:235,windowMs:145,branchSpeed:680,points:makePath(1),gaps:[.72,.64,.58,.52],costs:[36,39,42,45,48],branchLens:[62,58,64,56,60]},
     ];
     stage.innerHTML=`<div class="fuse-game">
       <div class="fuse-topline"><div class="trial-label"><span id="fuse-stage-name">FUSE 1</span> · JUNCTION <span id="fuse-target-no">1</span> / 5 · 💎 <span id="fuse-gems">0</span> / ${totalGems}</div><div class="fuse-score">SCORE <strong id="fuse-score">0</strong><small>/ ${maxScore}</small></div></div>
@@ -1129,13 +1144,13 @@ class PrecisionController{
       const spec=specs[stageIndex],metric=makeMetric(spec.points),baseIndex=stageIndex*5,windowDist=spec.speed*(spec.windowMs/1000),junctions:Junction[]=[];
       const dists:number[]=[];dists[0]=metric.total*(stageIndex===0?.14:.12)+(fuseUnit(6100+stageIndex)-.5)*18;
       for(let i=1;i<5;i++){const gapJitter=(fuseUnit(6110+stageIndex*20+i)-.5)*(stageIndex===0?.12:.07);dists[i]=dists[i-1]+spec.costs[i-1]+spec.speed*(spec.gaps[i-1]+gapJitter);}
-      const maxLast=metric.total*(stageIndex===0?.88:.79);if(dists[4]>maxLast){const first=dists[0],span=dists[4]-first,allowed=maxLast-first;for(let i=1;i<5;i++)dists[i]=first+(dists[i]-first)*(allowed/span);}
+      const maxLast=metric.total*(stageIndex===0?.88:.90);if(dists[4]>maxLast){const first=dists[0],span=dists[4]-first,allowed=maxLast-first;for(let i=1;i<5;i++)dists[i]=first+(dists[i]-first)*(allowed/span);}
       const sidePhase=fuseUnit(6120+stageIndex)>.5?1:0;
       for(let i=0;i<5;i++){
         const dist=dists[i],p=at(metric,dist),side=(i+sidePhase)%2===0?-1:1;const branchLen=spec.branchLens[i]+(fuseUnit(6140+stageIndex*20+i)-.5)*14;let tip={x:p.x+(-p.ty)*branchLen*side,y:p.y+p.tx*branchLen*side};tip={x:clamp(tip.x,38,V_W-38),y:clamp(tip.y,42,V_H-42)};junctions.push({global:baseIndex+i,local:i,dist,point:{x:p.x,y:p.y},tip,branchLen:Math.hypot(tip.x-p.x,tip.y-p.y),fuseCost:spec.costs[i],status:'pending',score:0,errorMs:900});
       }
       const updateTarget=()=>{const next=junctions.find(j=>j.status==='pending');targetNo.textContent=String(next?next.local+1:5);};
-      stageName.textContent=spec.name;stageSub.textContent=spec.subtitle;stageCount.textContent=`${stageIndex+1} / ${specs.length}`;updateTarget();boom.className='fuse-boom';pinchBtn.disabled=true;pinchBtn.className='fuse-pinch';pinchBtn.innerHTML='GET READY<small>The spark starts automatically</small>';status.className='';status.textContent=stageIndex===0?'GEM RUN READY':'RAPID RUN READY';detail.textContent=stageIndex===0?'5 clear junctions — learn the pinch timing':'All 5 junctions now arrive in a fast, playable rhythm';meterFill.style.width='100%';meterLabel.textContent='FUSE TO BOMB 100%';
+      stageName.textContent=spec.name;stageSub.textContent=spec.subtitle;stageCount.textContent=`${stageIndex+1} / ${specs.length}`;updateTarget();boom.className='fuse-boom';pinchBtn.disabled=true;pinchBtn.className='fuse-pinch';pinchBtn.innerHTML='GET READY<small>The spark starts automatically</small>';status.className='';status.textContent=stageIndex===0?'GEM RUN READY':'RAPID RUN READY';detail.textContent=stageIndex===0?'5 clear junctions — learn the pinch timing':'Half-length rapid fuse — all 5 junctions arrive fast with almost no dead time';meterFill.style.width='100%';meterLabel.textContent='FUSE TO BOMB 100%';
       let phase:'intro'|'main'|'branch'|'done'='intro',mainDistance=0,lastFrame=0,active:Junction|undefined,branchPos=0,branchOut=true,pinchCooldownUntil=0,lastResultText='',stageResolved=false;
       const markSkipped=(j:Junction,reason='SKIPPED')=>{if(j.status!=='pending')return;j.status='skipped';j.score=0;j.errorMs=900;rounds[j.global]=0;errors[j.global]=900;updateHistory();updateTarget();lastResultText=reason;this.sendProgress(j.global+1,reason,totalScore());};
       const nextPending=()=>junctions.find(j=>j.status==='pending');
@@ -1161,7 +1176,7 @@ class PrecisionController{
         if(diff>windowDist){markSkipped(j,'GEM MISSED');status.className='bad';status.textContent='TOO LATE';detail.textContent='That gem is gone — watch the next orange junction';sound.beep(180,.05);return;}
         const errorMs=Math.abs(diff)/spec.speed*1000,ratio=Math.min(1,errorMs/spec.windowMs),earned=Math.max(60,Math.min(100,Math.round(100-40*Math.pow(ratio,1.35))));j.status='collected';j.score=earned;j.errorMs=errorMs;rounds[j.global]=earned;errors[j.global]=Math.round(errorMs);active=j;branchPos=0;branchOut=true;mainDistance=j.dist;phase='branch';updateHistory();updateTarget();const label=earned>=97?'PERFECT PINCH!':earned>=88?'SHARP PINCH!':earned>=74?'CLEAN PINCH!':'GEM STOLEN!';status.className=earned>=88?'good':'okay';status.textContent=`${label} +${earned}`;detail.textContent=`Gem stolen — the remaining fuse is shortened by ${(j.fuseCost/spec.speed).toFixed(2)} s`;pinchBtn.className='fuse-pinch hit';pinchBtn.innerHTML=`💎 +${earned}<small>${Math.round(errorMs)} ms from centre</small>`;this.sendProgress(j.global+1,label,totalScore());sound.beep(earned>=95?1080:earned>=80?820:620,.07);
       };
-      draw();await sleep(stageIndex===0?760:620);if(this.destroyed)return;phase='main';lastFrame=performance.now();pinchBtn.disabled=false;pinchBtn.className='fuse-pinch';pinchBtn.innerHTML='PINCH!<small>Tap as the spark reaches an orange junction</small>';status.className='';status.textContent=stageIndex===0?'STEAL THE GEMS!':'RAPID RUN!';detail.textContent=stageIndex===0?'5 junctions · skipping is safe but scores 0':'All 5 junctions are close together — stay in rhythm';sound.beep(stageIndex===0?560:660,.06);
+      draw();await sleep(stageIndex===0?760:620);if(this.destroyed)return;phase='main';lastFrame=performance.now();pinchBtn.disabled=false;pinchBtn.className='fuse-pinch';pinchBtn.innerHTML='PINCH!<small>Tap as the spark reaches an orange junction</small>';status.className='';status.textContent=stageIndex===0?'STEAL THE GEMS!':'RAPID RUN!';detail.textContent=stageIndex===0?'5 junctions · skipping is safe but scores 0':'Short rapid fuse · react quickly — the bomb is close behind the final gem';sound.beep(stageIndex===0?560:660,.06);
       await new Promise<void>(resolve=>{
         const frame=(now:number)=>{
           if(this.destroyed){resolve();return;}const dt=Math.min(.045,Math.max(0,(now-lastFrame)/1000));lastFrame=now;
