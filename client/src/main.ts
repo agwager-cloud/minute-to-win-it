@@ -28,15 +28,51 @@ function safeSpectatorFragment(html:string){
 
 class NeonBackdrop extends Phaser.Scene{
   particles:Phaser.GameObjects.Arc[]=[];
+  private background?:Phaser.GameObjects.Graphics;
+  private grid?:Phaser.GameObjects.Graphics;
+  private glow?:Phaser.GameObjects.Graphics;
+  private backdropW=DESIGN_W;
+  private backdropH=DESIGN_H;
   create(){
-    const g=this.add.graphics();g.fillGradientStyle(0x050817,0x111a43,0x070a20,0x1a1038,1);g.fillRect(0,0,DESIGN_W,DESIGN_H);
-    const grid=this.add.graphics();grid.lineStyle(1,0x56d8ff,.07);for(let x=0;x<DESIGN_W;x+=64)grid.lineBetween(x,0,x,DESIGN_H);for(let y=0;y<DESIGN_H;y+=64)grid.lineBetween(0,y,DESIGN_W,y);
-    for(let i=0;i<30;i++){const c=this.add.circle(Phaser.Math.Between(0,DESIGN_W),Phaser.Math.Between(0,DESIGN_H),Phaser.Math.Between(2,7),i%3===0?0xffce3a:0x56d8ff,Phaser.Math.FloatBetween(.08,.25));this.particles.push(c);}
-    const glow=this.add.graphics();glow.fillStyle(0x00d8ff,.08);glow.fillCircle(120,110,260);glow.fillStyle(0xff3f8f,.07);glow.fillCircle(1160,620,300);
+    this.background=this.add.graphics();
+    this.grid=this.add.graphics();
+    this.glow=this.add.graphics();
+    const w=Math.max(1,this.scale.width||window.innerWidth||DESIGN_W),h=Math.max(1,this.scale.height||window.innerHeight||DESIGN_H);
+    this.backdropW=w;this.backdropH=h;
+    for(let i=0;i<30;i++){const c=this.add.circle(Phaser.Math.Between(0,w),Phaser.Math.Between(0,h),Phaser.Math.Between(2,7),i%3===0?0xffce3a:0x56d8ff,Phaser.Math.FloatBetween(.08,.25));this.particles.push(c);}
+    this.drawBackdrop(w,h,false);
+    this.scale.on('resize',this.handleBackdropResize,this);
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN,()=>this.scale.off('resize',this.handleBackdropResize,this));
   }
-  update(time:number){this.particles.forEach((p,i)=>{p.y+=.06+(i%4)*.018;if(p.y>730)p.y=-10;p.alpha=.08+(.12*(1+Math.sin(time/700+i)))/2;});}
+  private handleBackdropResize(gameSize:{width:number;height:number}){
+    this.drawBackdrop(Math.max(1,gameSize.width),Math.max(1,gameSize.height),true);
+  }
+  private drawBackdrop(w:number,h:number,repositionParticles:boolean){
+    const oldW=Math.max(1,this.backdropW),oldH=Math.max(1,this.backdropH);
+    if(repositionParticles){
+      const rx=w/oldW,ry=h/oldH;
+      this.particles.forEach(p=>{p.x=Math.max(-10,Math.min(w+10,p.x*rx));p.y=Math.max(-10,Math.min(h+10,p.y*ry));});
+    }
+    this.backdropW=w;this.backdropH=h;
+    this.background?.clear();this.background?.fillGradientStyle(0x050817,0x111a43,0x070a20,0x1a1038,1);this.background?.fillRect(0,0,w,h);
+    this.grid?.clear();this.grid?.lineStyle(1,0x56d8ff,.07);
+    for(let x=0;x<w+64;x+=64)this.grid?.lineBetween(x,0,x,h);
+    for(let y=0;y<h+64;y+=64)this.grid?.lineBetween(0,y,w,y);
+    this.glow?.clear();
+    const minDim=Math.min(w,h);
+    this.glow?.fillStyle(0x00d8ff,.08);this.glow?.fillCircle(w*.09,h*.15,Math.max(230,minDim*.36));
+    this.glow?.fillStyle(0xff3f8f,.07);this.glow?.fillCircle(w*.83,h*.84,Math.max(260,minDim*.42));
+  }
+  update(time:number){
+    const w=Math.max(1,this.backdropW),h=Math.max(1,this.backdropH);
+    this.particles.forEach((p,i)=>{p.y+=.06+(i%4)*.018;if(p.y>h+10){p.y=-10;p.x=Phaser.Math.Between(0,w);}p.alpha=.08+(.12*(1+Math.sin(time/700+i)))/2;});
+  }
 }
-new Phaser.Game({type:Phaser.AUTO,width:DESIGN_W,height:DESIGN_H,parent:'phaser-bg',backgroundColor:'#050817',scene:[NeonBackdrop],scale:{mode:Phaser.Scale.RESIZE,autoCenter:Phaser.Scale.CENTER_BOTH}});
+const backdropGame=new Phaser.Game({type:Phaser.AUTO,width:DESIGN_W,height:DESIGN_H,parent:'phaser-bg',backgroundColor:'#050817',scene:[NeonBackdrop],scale:{mode:Phaser.Scale.RESIZE,autoCenter:Phaser.Scale.CENTER_BOTH}});
+const syncBackdropViewport=()=>requestAnimationFrame(()=>{const w=Math.max(1,window.innerWidth),h=Math.max(1,window.innerHeight);backdropGame.scale.resize(w,h);});
+window.addEventListener('resize',syncBackdropViewport,{passive:true});
+window.addEventListener('orientationchange',()=>setTimeout(syncBackdropViewport,80));
+document.addEventListener('fullscreenchange',()=>{syncBackdropViewport();setTimeout(syncBackdropViewport,120);setTimeout(syncBackdropViewport,360);});
 
 class SoundBank{
   enabled=localStorage.getItem('mtwi-sound')!=='off';
@@ -169,8 +205,8 @@ class MinuteApp{
     if(this.me?.isHost&&this.hostMatchupsMode){this.renderMatchups();return;}
     this.renderMatchups();
   }
-  shell(inner:string,klass=''){
-    return `<main class="screen ${klass}"><header class="topbar"><div class="brand-mini"><span class="brand-stopwatch">⏱</span><div><strong>MINUTE TO WIN IT</strong><small>ONE COURT · ONE CHALLENGE · KEEP MOVING RIGHT</small></div></div>${this.room?`<div class="room-pill"><small>ROOM</small><strong>${esc(this.room.code)}</strong></div>`:''}<button id="sound-toggle" class="icon-btn">${sound.enabled?'🔊':'🔇'}</button><div id="connection-badge" class="connection ${this.status}">${this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING'}</div></header>${inner}</main>`;
+  shell(inner:string,klass='',topbarExtra=''){
+    return `<main class="screen ${klass}"><header class="topbar"><div class="brand-mini"><span class="brand-stopwatch">⏱</span><div><strong>MINUTE TO WIN IT</strong><small>ONE COURT · ONE CHALLENGE · KEEP MOVING RIGHT</small></div></div>${topbarExtra}${this.room?`<div class="room-pill"><small>ROOM</small><strong>${esc(this.room.code)}</strong></div>`:''}<button id="sound-toggle" class="icon-btn">${sound.enabled?'🔊':'🔇'}</button><div id="connection-badge" class="connection ${this.status}">${this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING'}</div></header>${inner}</main>`;
   }
   bindCommon(){const btn=document.querySelector<HTMLButtonElement>('#sound-toggle');btn?.addEventListener('click',()=>{const enabled=sound.toggle();btn.textContent=enabled?'🔊':'🔇';if(enabled)sound.beep();});}
   updateConnectionBadge(){const el=document.querySelector('#connection-badge');if(el){el.className=`connection ${this.status}`;el.textContent=this.status==='online'?'ONLINE':this.status==='offline'?'RECONNECTING':'CONNECTING';}}
@@ -206,7 +242,8 @@ class MinuteApp{
     const manageRows=room.players.filter(p=>!p.isHost&&!p.isBot).sort((a,b)=>a.name.localeCompare(b.name)).map(p=>{const active=room.courts.find(c=>c.activeMatch?.playerIds.includes(p.id));const waiting=room.courts.find(c=>c.waiting.includes(p.id));const status=!p.connected?'OFFLINE':active?`PLAYING · COURT ${active.index+1}`:lateSet.has(p.id)?'WAITING TO PAIR':waitingSet.has(p.id)?`WAITING · COURT ${(waiting?.index??0)+1}`:'SPECTATING / AVAILABLE';return `<div class="manage-player-row"><div><span class="presence ${p.connected?'on':''}"></span><strong>${esc(p.name)}</strong><small>${status}</small></div><button class="danger small" data-manage-kick="${p.id}">REMOVE</button></div>`}).join('');
     const manageOverlay=this.me?.isHost&&this.managePlayersOpen?`<div class="manage-backdrop" id="manage-backdrop"><section class="manage-modal"><div class="manage-head"><div><span class="eyebrow">HOST CONTROLS</span><h3>Manage Players</h3><p>Remove inappropriate names, disconnected devices or students who should leave the room.</p></div><button id="close-manage" class="icon-btn">✕</button></div><div class="manage-player-list">${manageRows||'<div class="empty-court">No students are currently in the room.</div>'}</div><div class="manage-foot">Removing an active player awards that match to their opponent so the court can keep moving.</div></section></div>`:'';
     const waitingBanner=!this.activeMatchFor(this.session?.playerId)&&!this.me?.isHost?`<div class="waiting-spectator-banner">👁 YOU ARE WAITING · Tap any live court to spectate. You will automatically enter your match when paired.</div>`:'';
-    appEl.innerHTML=this.shell(`<section class="matchup-wrap"><div class="matchup-title"><div><span class="eyebrow">KING OF THE COURT</span><h2>${game.symbol} ${esc(game.title)}</h2><p>Winner moves right · Loser moves left · Every win = +1 match point</p></div>${this.me?.isHost?`<div class="host-match-actions">${room.phase==='matchups'?'<button id="begin" class="primary">BEGIN MATCHUPS</button>':''}<button id="host-participation" class="host-participation-toggle ${hostOptedIn?'opt-out':'opt-in'}" title="${hostOptedIn?'Stop playing and spectate only':'Rejoin from the lowest court'}">${hostOptedIn?'◌ OPT OUT':'▶ OPT IN'}</button><button id="manage-players" class="secondary">👥 MANAGE PLAYERS</button><button id="return-lobby" class="secondary">RETURN TO LOBBY</button></div>`:''}</div>${waitingBanner}<div class="courts-scroll">${courts}</div><section class="score-strip"><div class="score-label">MATCH POINTS</div>${ranked.map(p=>`<div class="score-tile ${p.id===champion?'champ':''}">${p.id===champion?'👑 ':''}<strong>${esc(p.name)}</strong><span>${p.points}</span></div>`).join('')}</section><div class="spectator-tip">Tap any live court to watch the actual player view. Late players are paired automatically on the lowest court when an eligible opponent is available.</div></section>${manageOverlay}`,'matchup-screen');
+    const hostParticipationTopbar=this.me?.isHost?`<button id="host-participation" class="host-participation-toggle topbar-host-participation ${hostOptedIn?'opt-out':'opt-in'}" title="${hostOptedIn?'Stop playing and spectate only':'Rejoin from the lowest court'}">${hostOptedIn?'◌ OPT OUT':'▶ OPT IN'}</button>`:'';
+    appEl.innerHTML=this.shell(`<section class="matchup-wrap"><div class="matchup-title"><div><span class="eyebrow">KING OF THE COURT</span><h2>${game.symbol} ${esc(game.title)}</h2><p>Winner moves right · Loser moves left · Every win = +1 match point</p></div>${this.me?.isHost?`<div class="host-match-actions">${room.phase==='matchups'?'<button id="begin" class="primary">BEGIN MATCHUPS</button>':''}<button id="manage-players" class="secondary">👥 MANAGE PLAYERS</button><button id="return-lobby" class="secondary">RETURN TO LOBBY</button></div>`:''}</div>${waitingBanner}<div class="courts-scroll">${courts}</div><section class="score-strip"><div class="score-label">MATCH POINTS</div>${ranked.map(p=>`<div class="score-tile ${p.id===champion?'champ':''}">${p.id===champion?'👑 ':''}<strong>${esc(p.name)}</strong><span>${p.points}</span></div>`).join('')}</section><div class="spectator-tip">Tap any live court to watch the actual player view. Late players are paired automatically on the lowest court when an eligible opponent is available.</div></section>${manageOverlay}`,'matchup-screen',hostParticipationTopbar);
     this.bindCommon();
     document.querySelector('#begin')?.addEventListener('click',()=>{this.hostMatchupsMode=false;this.net.send({type:'begin-matchups'})});
     document.querySelector('#return-lobby')?.addEventListener('click',()=>this.net.send({type:'return-lobby'}));

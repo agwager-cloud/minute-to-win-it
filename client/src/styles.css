@@ -107,3 +107,56 @@
 .spectator-live-root{position:relative}.spectator-stale-badge{position:absolute;right:10px;bottom:10px;z-index:4;padding:6px 9px;border-radius:999px;background:rgba(69,28,15,.9);border:1px solid rgba(255,183,91,.55);color:#ffd89b;font-size:7px;font-weight:1000;letter-spacing:.1em;box-shadow:0 5px 20px rgba(0,0,0,.32)}
 @media(max-width:800px){.host-participation-toggle{padding:6px 8px;font-size:7px}.courts-scroll::-webkit-scrollbar{height:6px}}
 @media(max-height:520px) and (orientation:landscape){.host-participation-toggle{padding:5px 7px;font-size:6px}.host-match-actions{align-items:center}}
+
+
+/* v0.1.8 — host matchup header + true fullscreen backdrop */
+#phaser-bg canvas{
+  display:block!important;
+  width:100%!important;
+  height:100%!important;
+  max-width:none!important;
+  max-height:none!important;
+}
+.matchup-title{min-width:0}
+.matchup-title>div:first-child{min-width:0}
+.host-match-actions{
+  flex:0 0 auto;
+  flex-wrap:nowrap!important;
+  align-items:center;
+  justify-content:flex-end;
+}
+.host-match-actions .primary,
+.host-match-actions .secondary{white-space:nowrap}
+.topbar-host-participation{
+  flex:0 0 auto;
+  margin-left:4px;
+  margin-right:0;
+  box-shadow:0 0 16px rgba(255,211,77,.06);
+}
+@media(max-width:980px){
+  .matchup-title{gap:10px}
+  .matchup-title p{font-size:10px}
+  .host-match-actions{gap:5px}
+  .host-match-actions .primary,
+  .host-match-actions .secondary{padding:9px 10px;font-size:9px}
+}
+@media(max-width:800px){
+  .topbar-host-participation{padding:5px 7px;font-size:6px;letter-spacing:.06em;margin-left:2px}
+  .matchup-title p{display:none}
+  .host-match-actions{gap:4px}
+  .host-match-actions .primary,
+  .host-match-actions .secondary{padding:7px 8px;font-size:8px}
+}
+@media(max-height:520px) and (orientation:landscape){
+  .topbar-host-participation{padding:4px 6px;font-size:6px}
+  .host-match-actions .primary,
+  .host-match-actions .secondary{padding:6px 7px;font-size:7px}
+}
+@media(max-width:620px){
+  .brand-mini strong{font-size:10px}
+  .brand-stopwatch{font-size:19px}
+  .topbar{gap:6px}
+  .room-pill{gap:4px;padding:4px 6px}
+  .room-pill small{display:none}
+  .topbar-host-participation{padding:4px 5px;font-size:5.5px}
+}
