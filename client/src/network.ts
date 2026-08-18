@@ -14,7 +14,7 @@ export type MatchState = {
 };
 export type CourtState = { index:number; activeMatch?:MatchState; waiting:string[] };
 export type RoomState = {
-  code:string; hostId:string; selectedGameId:string; phase:'lobby'|'matchups'|'playing'; hostParticipating:boolean;
+  code:string; hostId:string; selectedGameId:string; phase:'lobby'|'matchups'|'playing'; hostParticipating:boolean; hostOptedIn:boolean;
   turnSeconds:number; serverTime:number; lateJoinQueue:string[]; currentChampionId?:string;
   players:PlayerState[]; courts:CourtState[];
 };
