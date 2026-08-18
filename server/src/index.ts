@@ -324,6 +324,7 @@ type Room = {
   phase: Phase;
   courts: Court[];
   hostParticipating: boolean;
+  hostOptedIn: boolean;
   hostExitAfterMatch: boolean;
   turnSeconds: number;
   starterHistory: Map<string, string>;
@@ -350,6 +351,7 @@ type ClientMessage =
   | { type: 'host-logout' }
   | { type: 'prepare-matchups' }
   | { type: 'begin-matchups' }
+  | { type: 'set-host-participation'; participating: boolean }
   | { type: 'resolve-match'; matchId: string; winnerId: string }
   | { type: 'precision-progress'; matchId: string; round: number; label: string; value?: number; precisionRound?: number }
   | { type: 'precision-result'; matchId: string; score: number; secondary?: number; display: string; rounds?: number[]; precisionRound?: number }
@@ -419,6 +421,7 @@ function publicState(room: Room) {
       selectedGameId: room.selectedGameId,
       phase: room.phase,
       hostParticipating: room.hostParticipating,
+      hostOptedIn: room.hostOptedIn,
       turnSeconds: room.turnSeconds,
       serverTime: Date.now(),
       lateJoinQueue: [...room.lateJoinQueue],
@@ -650,6 +653,10 @@ function chooseStartingPlayer(room: Room, match: Match) {
   return startingPlayerId;
 }
 
+function isEligibleLadderHuman(room: Room, player: Player | undefined) {
+  return Boolean(player && !player.isBot && player.connected && (player.id !== room.hostId || room.hostOptedIn));
+}
+
 function prepareCourts(room: Room) {
   room.hostExitAfterMatch = false;
   const host = room.players.get(room.hostId);
@@ -663,16 +670,16 @@ function prepareCourts(room: Room) {
   // The host is a real player whenever there is another human available. This
   // fixes the Host + 1 student case, which must be a human-vs-human match rather
   // than Student vs Bot with the teacher spectating.
-  const humans = shuffled([...room.players.values()].filter((p) => !p.isBot && p.connected));
+  const humans = shuffled([...room.players.values()].filter((p) => isEligibleLadderHuman(room, p)));
   room.courts = [];
 
   if (humans.length === 1) {
     const bot = createPracticeBot();
     room.players.set(bot.id, bot);
-    room.hostParticipating = true;
+    room.hostParticipating = Boolean(room.hostOptedIn && humans[0].id === room.hostId);
     room.courts.push({ index: 0, activeMatch: makeMatch(0, humans[0].id, bot.id, 'ready'), waiting: [] });
   } else {
-    room.hostParticipating = humans.some((p) => p.id === room.hostId);
+    room.hostParticipating = room.hostOptedIn && humans.some((p) => p.id === room.hostId);
     let courtIndex = 0;
 
     // Odd human totals need exactly one parity bot. Prefer the host as the bot's
@@ -4412,7 +4419,7 @@ function takeNextConnectedLateJoiner(room: Room) {
   for (let i = 0; i < room.lateJoinQueue.length; i++) {
     const playerId = room.lateJoinQueue[i];
     const player = room.players.get(playerId);
-    if (!player || player.isHost || player.isBot) {
+    if (!player || player.isBot || (player.id === room.hostId && !room.hostOptedIn)) {
       room.lateJoinQueue.splice(i, 1);
       i -= 1;
       continue;
@@ -4475,7 +4482,7 @@ function replaceIdleBotWithLateJoiner(room: Room, latePlayerId: string) {
 function connectedLateJoinerCount(room: Room) {
   return room.lateJoinQueue.filter((id) => {
     const player = room.players.get(id);
-    return Boolean(player && !player.isHost && !player.isBot && player.connected);
+    return Boolean(player && isEligibleLadderHuman(room, player));
   }).length;
 }
 
@@ -4535,7 +4542,7 @@ function rebuildNextRoundIfReady(room: Room) {
   for (const court of room.courts) {
     for (const playerId of court.waiting) {
       const player = room.players.get(playerId);
-      if (!player || player.isBot || !player.connected) continue;
+      if (!isEligibleLadderHuman(room, player)) continue;
       if (!desired.has(playerId)) desired.set(playerId, { court: court.index, order: order++ });
     }
   }
@@ -4544,19 +4551,19 @@ function rebuildNextRoundIfReady(room: Room) {
   // clean round boundary.
   for (const playerId of room.lateJoinQueue) {
     const player = room.players.get(playerId);
-    if (!player || player.isBot || !player.connected) continue;
+    if (!isEligibleLadderHuman(room, player)) continue;
     if (!desired.has(playerId)) desired.set(playerId, { court: 0, order: order++ });
   }
 
   // Safety net: no connected human may disappear from the next round merely
   // because an earlier routing queue became inconsistent.
   for (const player of room.players.values()) {
-    if (player.isBot || !player.connected) continue;
+    if (!isEligibleLadderHuman(room, player)) continue;
     if (!desired.has(player.id)) desired.set(player.id, { court: 0, order: order++ });
   }
 
   const humans = [...room.players.values()]
-    .filter((player) => !player.isBot && player.connected)
+    .filter((player) => isEligibleLadderHuman(room, player))
     .sort((a, b) => {
       const pa = desired.get(a.id) ?? { court: 0, order: 0 };
       const pb = desired.get(b.id) ?? { court: 0, order: 0 };
@@ -4573,7 +4580,7 @@ function rebuildNextRoundIfReady(room: Room) {
   // reconnect. Connected late joiners are being integrated now.
   room.lateJoinQueue = room.lateJoinQueue.filter((id) => {
     const player = room.players.get(id);
-    return Boolean(player && !player.isBot && !player.connected);
+    return Boolean(player && !player.isBot && !player.connected && (player.id !== room.hostId || room.hostOptedIn));
   });
 
   const nextCourts: Court[] = [];
@@ -4603,7 +4610,7 @@ function rebuildNextRoundIfReady(room: Room) {
   }
 
   room.courts = nextCourts;
-  room.hostParticipating = allHumans.some((player) => player.id === room.hostId);
+  room.hostParticipating = room.hostOptedIn && allHumans.some((player) => player.id === room.hostId);
   room.hostExitAfterMatch = false;
   if (room.currentChampionId && !allHumans.some((player) => player.id === room.currentChampionId)) room.currentChampionId = undefined;
 
@@ -4620,7 +4627,7 @@ function rebalanceHostAfterRemoval(room: Room) {
   if (room.phase === 'lobby') return;
   const host = room.players.get(room.hostId);
   room.hostExitAfterMatch = false;
-  room.hostParticipating = Boolean(host?.connected && (playerActiveMatch(room, room.hostId) || playerWaitingCourt(room, room.hostId)));
+  room.hostParticipating = Boolean(room.hostOptedIn && host?.connected && (playerActiveMatch(room, room.hostId) || playerWaitingCourt(room, room.hostId) || room.lateJoinQueue.includes(room.hostId)));
 }
 
 function kickPlayerFromRoom(room: Room, targetId: string) {
@@ -4695,7 +4702,7 @@ function resolveMatch(room: Room, matchId: string, winnerId: string) {
   const routeHuman = (playerId: string, destination: number) => {
     const player = room.players.get(playerId);
     if (!player || player.isBot) return;
-    if (playerId === room.hostId && room.hostExitAfterMatch) {
+    if (playerId === room.hostId && (!room.hostOptedIn || room.hostExitAfterMatch)) {
       room.hostParticipating = false;
       room.hostExitAfterMatch = false;
       return;
@@ -4798,6 +4805,7 @@ wss.on('connection', (ws) => {
           phase: 'lobby',
           courts: [],
           hostParticipating: false,
+          hostOptedIn: true,
           hostExitAfterMatch: false,
           turnSeconds: defaultTurnSeconds('lights-out'),
           starterHistory: new Map(),
@@ -4927,6 +4935,68 @@ wss.on('connection', (ws) => {
         if (!room) return;
         if (room.phase !== 'matchups') throw new Error('Prepare the matchups first.');
         beginInitialMatches(room);
+        return;
+      }
+
+      if (msg.type === 'set-host-participation') {
+        const result = requireHost(ws);
+        if (!result) return;
+        const { room, ctx } = result;
+        const host = room.players.get(room.hostId);
+        if (!host || ctx.playerId !== host.id) return;
+        const participating = Boolean(msg.participating);
+        if (participating === room.hostOptedIn) { broadcastRoom(room); return; }
+
+        if (!participating) {
+          room.hostOptedIn = false;
+          room.hostExitAfterMatch = false;
+          room.lateJoinQueue = room.lateJoinQueue.filter((id) => id !== host.id);
+          for (const court of room.courts) court.waiting = court.waiting.filter((id) => id !== host.id);
+
+          if (room.phase === 'matchups') {
+            room.hostParticipating = false;
+            prepareCourts(room);
+            broadcastRoom(room);
+            return;
+          }
+
+          const activeCourt = playerActiveMatch(room, host.id);
+          const activeMatch = activeCourt?.activeMatch;
+          if (activeCourt && activeMatch) {
+            const opponentId = activeMatch.playerIds.find((id) => id !== host.id);
+            if (opponentId) {
+              // Opting out of an already-created match is an immediate forfeit.
+              // A countdown has not yet entered the normal resolver, so promote it
+              // briefly to playing; the old countdown callback sees the match has
+              // disappeared and safely exits.
+              if (activeMatch.status === 'ready' || activeMatch.status === 'countdown') activeMatch.status = 'playing';
+              room.hostExitAfterMatch = true;
+              resolveMatch(room, activeMatch.id, opponentId);
+              return;
+            }
+          }
+
+          room.hostParticipating = false;
+          if (room.currentChampionId === host.id) room.currentChampionId = undefined;
+          if (!rebuildNextRoundIfReady(room)) broadcastRoom(room);
+          return;
+        }
+
+        room.hostOptedIn = true;
+        room.hostExitAfterMatch = false;
+        if (room.phase === 'matchups') {
+          prepareCourts(room);
+          broadcastRoom(room);
+          return;
+        }
+        if (room.phase === 'playing') {
+          if (!playerActiveMatch(room, host.id) && !playerWaitingCourt(room, host.id) && !room.lateJoinQueue.includes(host.id)) queueLateJoiner(room, host.id);
+          integrateLateJoiners(room);
+          room.hostParticipating = Boolean(playerActiveMatch(room, host.id) || playerWaitingCourt(room, host.id) || room.lateJoinQueue.includes(host.id));
+          broadcastRoom(room);
+          return;
+        }
+        broadcastRoom(room);
         return;
       }
 
